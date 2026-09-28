@@ -319,9 +319,8 @@ impl Env {
     pub fn holder_shares(&self, l: &Launched, s: &SeededBasket) -> u64 {
         let pool = self.pool_state(&s.pool);
         let pos = self.position_state(&damm::position(&s.position_nft_mint));
-        let (a, _) =
-            math::position_amounts(pos.unlocked_liquidity, pool.sqrt_min_price, pool.sqrt_price, pool.sqrt_max_price)
-                .unwrap();
+        let a = math::position_shares(pos.unlocked_liquidity, pool.sqrt_min_price, pool.sqrt_price, pool.sqrt_max_price)
+            .unwrap();
         let b: Basket = self.load(&l.basket);
         self.mint_supply(&l.share_mint) - a + b.pending_redeem_shares
     }
@@ -329,7 +328,15 @@ impl Env {
     /// Off-chain mirror of `mint`: creation-unit shares, step-rule `r`,
     /// treasury shares and the SOL the pool will pull.
     pub fn mint_quote(&self, l: &Launched, s: &SeededBasket, deposits: &[u64]) -> MintQuote {
-        let vaults: Vec<u64> = l.mints.iter().map(|m| self.token_amount(&Env::ata(&l.basket, m))).collect();
+        // Priced off `vault − owed`: amounts owed to frozen claimants do not back holder shares.
+        let vaults: Vec<u64> = l
+            .mints
+            .iter()
+            .map(|m| {
+                let p: Position = self.load(&position_pda(&l.share_mint, m));
+                self.token_amount(&Env::ata(&l.basket, m)) - p.owed
+            })
+            .collect();
         let h = self.holder_shares(l, s);
         let gross_shares = math::shares_for_deposits(deposits, &vaults, h).unwrap();
         let b: Basket = self.load(&l.basket);

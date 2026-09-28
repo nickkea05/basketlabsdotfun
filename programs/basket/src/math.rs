@@ -273,6 +273,16 @@ pub fn position_amounts(
     Ok((a, b))
 }
 
+/// Shares a position of `liquidity` holds, rounded up: cp-amm pulls deposits
+/// rounded up, so this is the exact count after `add_liquidity`, and it keeps
+/// `supply − in_pool` from over-counting holder shares by a unit.
+pub fn position_shares(liquidity: u128, sqrt_min: u128, sqrt_price: u128, sqrt_max: u128) -> Result<u64> {
+    if liquidity == 0 || sqrt_price >= sqrt_max {
+        return Ok(0);
+    }
+    delta_a(sqrt_price.max(sqrt_min), sqrt_max, liquidity, Rounding::Up)
+}
+
 /// `liquidity * num / den`, rounded down.
 pub fn liquidity_share(liquidity: u128, num: u64, den: u64) -> Result<u128> {
     if den == 0 {

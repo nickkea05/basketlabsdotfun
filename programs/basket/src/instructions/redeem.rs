@@ -30,7 +30,7 @@ use crate::constants::*;
 use crate::damm::{self, cp_amm};
 use crate::error::BasketError;
 use crate::events::*;
-use crate::instructions::positions::{load_components, read_token_amount, ComponentAccounts, COMPONENT_GROUP};
+use crate::instructions::positions::{load_components, read_token_amount, ComponentAccounts};
 use crate::instructions::sleeve::*;
 use crate::math::{self, Rounding};
 use crate::state::*;
@@ -367,12 +367,13 @@ fn pay_components<'info>(
         }
         let tp = if c.position.token_program == token::ID { programs.token } else { programs.token_2022 };
         if c.vault_frozen || c.user_frozen {
+            let (claim_key, bump) = frozen_claim_address(&signer.share_mint, holder.key, &c.position.mint);
             let claim = claims
                 .iter()
-                .find(|ai| ai.key() == frozen_claim_address(&signer.share_mint, holder.key, &c.position.mint).0)
+                .find(|ai| ai.key() == claim_key)
                 .ok_or_else(|| error!(BasketError::ComponentFrozen))?;
-            record_claim(claim, &signer.share_mint, basket_key, holder, &c.position.mint, amount, now, programs.system)?;
-            let mut position = c.position.clone();
+            record_claim(claim, bump, &signer.share_mint, basket_key, holder, &c.position.mint, amount, now, programs.system)?;
+            let mut position: Position = (*c.position).clone();
             position.owed = position.owed.checked_add(amount).ok_or_else(|| error!(BasketError::MathOverflow))?;
             let mut data = c.position_ai.try_borrow_mut_data()?;
             position.try_serialize(&mut &mut data[..])?;
@@ -407,6 +408,7 @@ pub fn frozen_claim_address(share_mint: &Pubkey, wallet: &Pubkey, mint: &Pubkey)
 #[allow(clippy::too_many_arguments)]
 fn record_claim<'info>(
     claim: &AccountInfo<'info>,
+    bump: u8,
     share_mint: &Pubkey,
     basket_key: &Pubkey,
     holder: &AccountInfo<'info>,
@@ -415,7 +417,6 @@ fn record_claim<'info>(
     now: i64,
     system_program: &AccountInfo<'info>,
 ) -> Result<()> {
-    let (_, bump) = frozen_claim_address(share_mint, holder.key, mint);
     let mut state = if claim.data_is_empty() {
         let space = 8 + FrozenClaim::INIT_SPACE;
         let lamports = Rent::get()?.minimum_balance(space);

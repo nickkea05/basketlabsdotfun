@@ -207,14 +207,15 @@ pub fn split_mint_fee(gross: u64, fee_bps: u16) -> Result<(u64, u64)> {
     Ok((gross - fee, fee))
 }
 
-/// Shares the basket's pool position currently holds.
-pub fn position_share_amount(pool: &cp_amm::accounts::Pool, position: &cp_amm::accounts::Position) -> Result<(u64, u64)> {
+/// Shares the basket's pool position currently holds (rounded up, see
+/// `math::position_shares`).
+pub fn position_share_amount(pool: &cp_amm::accounts::Pool, position: &cp_amm::accounts::Position) -> Result<u64> {
     let liquidity = position
         .unlocked_liquidity
         .checked_add(position.vested_liquidity)
         .and_then(|l| l.checked_add(position.permanent_locked_liquidity))
         .ok_or_else(|| error!(BasketError::MathOverflow))?;
-    math::position_amounts(liquidity, pool.sqrt_min_price, pool.sqrt_price, pool.sqrt_max_price)
+    math::position_shares(liquidity, pool.sqrt_min_price, pool.sqrt_price, pool.sqrt_max_price)
 }
 
 /// `supply − shares in our pool position + shares mid-redemption`: the
@@ -225,7 +226,7 @@ pub fn holder_shares(
     position: &cp_amm::accounts::Position,
     pending_redeem_shares: u64,
 ) -> Result<u64> {
-    let (in_pool, _) = position_share_amount(pool, position)?;
+    let in_pool = position_share_amount(pool, position)?;
     supply
         .checked_sub(in_pool)
         .and_then(|h| h.checked_add(pending_redeem_shares))
