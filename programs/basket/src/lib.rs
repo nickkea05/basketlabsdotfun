@@ -105,4 +105,14 @@ pub mod basket {
     pub fn claim_frozen(ctx: Context<ClaimFrozen>) -> Result<()> {
         handle_claim_frozen(ctx)
     }
+
+    /// Crank the position's pending swap fees (SOL) into the FeeVault. Anyone.
+    pub fn claim_pool_fees(ctx: Context<ClaimPoolFees>) -> Result<()> {
+        handle_claim_pool_fees(ctx)
+    }
+
+    /// Split accumulated fees: holder line reserved, creator and protocol lines out. Anyone.
+    pub fn sweep_fees(ctx: Context<SweepFees>) -> Result<()> {
+        handle_sweep_fees(ctx)
+    }
 }

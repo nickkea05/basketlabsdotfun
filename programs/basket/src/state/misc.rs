@@ -17,6 +17,10 @@ pub struct FeeVault {
     pub basket: Pubkey,
     pub holder_reserve_shares: u64,
     pub holder_reserve_lamports: u64,
+    /// Creator SOL line held back because paying it would have left the
+    /// creator wallet below rent exemption (a sweep must never revert on
+    /// the creator's account state). Paid on a later sweep.
+    pub creator_owed_lamports: u64,
     /// Lifetime totals, for the indexer.
     pub swept_creator_shares: u64,
     pub swept_creator_lamports: u64,

@@ -8,6 +8,7 @@
 #![allow(dead_code)]
 
 pub mod ed25519_stub;
+pub mod fees;
 pub mod redeem;
 pub mod sleeve;
 
