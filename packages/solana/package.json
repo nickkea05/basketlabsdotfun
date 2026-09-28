@@ -1,0 +1,15 @@
+{
+  "name": "@basketfun/solana",
+  "version": "0.0.1",
+  "description": "Solana helpers: base58, public key validation, well-known program ids. The Anchor client lands here once the program exists.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@anchor-lang/core": "^1.2.0"
+  }
+}

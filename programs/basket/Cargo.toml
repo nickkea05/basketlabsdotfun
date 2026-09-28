@@ -1,0 +1,58 @@
+[package]
+name = "basket"
+version = "0.1.0"
+description = "basketlabs.fun factory program: creates baskets, share mints and program-owned vaults"
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "basket"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { workspace = true }
+# Default features cover token, token_2022 (+ extensions) and associated_token.
+# Token-2022 matters: xStocks and several majors use it. `metadata` is the
+# Metaplex token-metadata CPI used for the share mint (D1).
+anchor-spl = { workspace = true, features = ["metadata"] }
+# `declare_program!(cp_amm)` generates zero-copy account types from
+# idls/cp_amm.json; they need bytemuck at the call site.
+bytemuck = { version = "1.20", features = ["derive", "min_const_generics"] }
+# 256-bit intermediates for the DAMM v2 liquidity <-> amount conversions
+# (sqrt prices are Q64.64, products overflow u128). Same crate cp-amm uses.
+ruint = { version = "1.12", default-features = false }
+# anchor-lang 1.x no longer re-exports these; versions match its own pins.
+solana-instructions-sysvar = "3.0"
+solana-sha256-hasher = "3.0"
+solana-sdk-ids = "3.1"
+
+# In-process SVM for tests. Anchor 1.2 builds SBPF v3 by default, which needs
+# litesvm >= 0.16 (Agave 4.2 runtime). Keep the solana-* versions aligned with
+# litesvm's own so transaction types line up.
+[dev-dependencies]
+# litesvm's `precompiles` feature drags in a vendored OpenSSL build (perl,
+# minutes of compile) for secp256r1. The ed25519 precompile the tests need is
+# re-implemented as a builtin in tests/common/ed25519_stub.rs with
+# ed25519-dalek, the same library the real precompile uses.
+litesvm = "0.16.0"
+solana-program-runtime = "4.2"
+ed25519-dalek = "2"
+solana-message = "4.2.4"
+solana-transaction = "4.1.5"
+solana-signer = "3.0.1"
+solana-keypair = "3.1.2"
+solana-account = "4.3"
+solana-program-pack = "3.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

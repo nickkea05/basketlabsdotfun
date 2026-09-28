@@ -1,0 +1,12 @@
+{
+  "name": "@basketfun/data",
+  "version": "0.0.1",
+  "description": "Market data clients: Jupiter (tokens, prices, wallet holdings) and GeckoTerminal (price history).",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@basketfun/core",
+  "version": "0.0.1",
+  "description": "Chain-agnostic protocol logic: basket types, weight math, launch parameters and validation.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test test/"
+  }
+}

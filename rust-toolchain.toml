@@ -1,0 +1,8 @@
+# Host toolchain for `cargo test` (LiteSVM) and IDL generation. Tracks the
+# Agave release LiteSVM's runtime crates come from (4.2.x -> 1.96.1).
+# The on-chain build ignores this: cargo-build-sbf uses the platform-tools
+# compiler bundled with the Solana CLI (v1.57 -> rustc 1.95).
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

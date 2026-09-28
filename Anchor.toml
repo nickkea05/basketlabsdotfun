@@ -1,0 +1,30 @@
+# Anchor workspace. Programs live in programs/*, the web app and JS packages
+# are npm workspaces beside them (see package.json).
+
+# Tests are Rust + LiteSVM (in-process SVM), so `anchor test` needs no
+# validator. For a real local cluster use `anchor localnet --validator legacy`.
+skip_local_validator = true
+
+# Solana CLI 4.1.2 is the version Anchor 1.2.0 documents; keep it active with
+# `agave-install init v4.1.2`. Not pinned here on purpose: `solana_version`
+# makes Anchor swap CLIs via agave-install before every command, which needs
+# admin on Windows and leaves no active release when it fails.
+[toolchain]
+anchor_version = "1.2.0"
+package_manager = "npm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+basket = "79SdBiQYuH2xU5pj8iQq3p7PMMTiaQ2PeWQ6vV7e4fnX"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "cargo test"
+
+[hooks]

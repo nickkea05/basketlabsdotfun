@@ -1,0 +1,11 @@
+node_modules
+dist
+target
+.anchor
+.surfpool
+test-ledger
+.wrangler
+package-lock.json
+Cargo.lock
+apps/web/public/brand
+apps/web/public/favicon.svg

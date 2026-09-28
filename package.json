@@ -1,0 +1,33 @@
+{
+  "name": "basketfun",
+  "private": true,
+  "version": "0.0.1",
+  "description": "basketlabs.fun — a Solana launchpad for basket tokens: fixed, wallet-mirroring and actively managed.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @basketfun/web",
+    "build": "npm run build -w @basketfun/web",
+    "preview": "npm run preview -w @basketfun/web",
+    "test": "node --test \"packages/*/test/*.test.js\"",
+    "anchor:build": "anchor build",
+    "anchor:test": "anchor test",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^7.0.0",
+    "eslint-plugin-react-refresh": "^0.4.26",
+    "globals": "^16.5.0",
+    "prettier": "^3.6.0"
+  }
+}
