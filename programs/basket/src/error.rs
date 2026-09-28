@@ -97,4 +97,6 @@ pub enum BasketError {
     NoRebalance,
     #[msg("A redemption is still pending for this wallet")]
     RedemptionPending,
+    #[msg("Crystallization period has not elapsed")]
+    CrystallizeTooSoon,
 }

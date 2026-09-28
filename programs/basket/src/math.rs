@@ -7,7 +7,7 @@
 use anchor_lang::prelude::*;
 use ruint::aliases::U256;
 
-use crate::constants::BPS_TOTAL;
+use crate::constants::{BPS_TOTAL, SECONDS_PER_YEAR, SHARE_DECIMALS};
 use crate::damm::{MAX_SQRT_PRICE, MIN_SQRT_PRICE};
 use crate::error::BasketError;
 use crate::state::PriceRange;
@@ -281,6 +281,52 @@ pub fn position_shares(liquidity: u128, sqrt_min: u128, sqrt_price: u128, sqrt_m
         return Ok(0);
     }
     delta_a(sqrt_price.max(sqrt_min), sqrt_max, liquidity, Rounding::Up)
+}
+
+/// NAV per whole share (lamports) of a fund worth `value_lamports` with
+/// `shares` base units outstanding.
+pub fn nav_per_share(value_lamports: u64, shares: u64) -> Result<u64> {
+    if shares == 0 {
+        return Ok(0);
+    }
+    mul_div_u64(value_lamports, 10u64.pow(SHARE_DECIMALS as u32), shares, Rounding::Down)
+}
+
+/// Management fee as share inflation (§4): mint `s` to the creator so they
+/// hold fraction `f = bps · elapsed / year` of the enlarged fund,
+/// `s = H·f / (1 − f)`, rounded down.
+pub fn mgmt_fee_shares(holder_shares: u64, bps_per_year: u16, elapsed_s: i64) -> Result<u64> {
+    if bps_per_year == 0 || elapsed_s <= 0 || holder_shares == 0 {
+        return Ok(0);
+    }
+    let num = U256::from(bps_per_year) * U256::from(elapsed_s as u64);
+    let den = U256::from(BPS_TOTAL) * U256::from(SECONDS_PER_YEAR as u64);
+    if num >= den {
+        return err!(BasketError::FeeOutOfBounds);
+    }
+    to_u64(mul_div_u256(U256::from(holder_shares), num, den - num, Rounding::Down)?)
+}
+
+/// Performance fee as share inflation (D12): on `nav > hwm` (both lamports
+/// per whole share) the creator is owed `perf · (nav − hwm) · H` of value;
+/// minting `s` shares at the post-dilution price gives
+/// `s = perf·(nav − hwm)·H / (nav − perf·(nav − hwm))`, rounded down.
+pub fn perf_fee_shares(holder_shares: u64, nav: u64, hwm: u64, perf_bps: u16) -> Result<u64> {
+    if perf_bps == 0 || nav <= hwm || holder_shares == 0 {
+        return Ok(0);
+    }
+    let profit = U256::from(nav - hwm) * U256::from(perf_bps); // × BPS_TOTAL
+    let den = U256::from(nav) * U256::from(BPS_TOTAL) - profit;
+    to_u64(mul_div_u256(U256::from(holder_shares), profit, den, Rounding::Down)?)
+}
+
+/// NAV per share after minting `minted` new shares against the same value.
+pub fn diluted_nav(nav: u64, holder_shares: u64, minted: u64) -> Result<u64> {
+    if minted == 0 {
+        return Ok(nav);
+    }
+    let total = holder_shares.checked_add(minted).ok_or_else(|| error!(BasketError::MathOverflow))?;
+    mul_div_u64(nav, holder_shares, total, Rounding::Down)
 }
 
 /// `liquidity * num / den`, rounded down.

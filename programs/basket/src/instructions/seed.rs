@@ -271,6 +271,12 @@ pub fn handle_seed<'info>(ctx: Context<'info, Seed<'info>>, args: SeedArgs) -> R
     basket.pool = ctx.accounts.pool.key();
     basket.position_nft_mint = ctx.accounts.position_nft_mint.key();
     basket.pool_position = ctx.accounts.pool_position.key();
+    // D12: the high-water mark starts at the opening NAV, the fund's value
+    // (components + sleeve, creation fee excluded) over the gross shares.
+    let opening_value = implied_total - config.fees.creation_fee_lamports;
+    basket.hwm_nav_lamports = math::nav_per_share(opening_value, args.initial_shares)?;
+    basket.last_crystallized_ts = now;
+    basket.last_mgmt_accrual_ts = now;
     basket.touch(now);
 
     emit!(Seeded {

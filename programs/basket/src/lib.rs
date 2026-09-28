@@ -115,4 +115,10 @@ pub mod basket {
     pub fn sweep_fees(ctx: Context<SweepFees>) -> Result<()> {
         handle_sweep_fees(ctx)
     }
+
+    /// Managed only, once per period: management fee accrual plus the
+    /// performance fee above the HWM on a keeper-attested NAV.
+    pub fn crystallize(ctx: Context<Crystallize>, nav_lamports_per_share: u64) -> Result<()> {
+        handle_crystallize(ctx, nav_lamports_per_share)
+    }
 }

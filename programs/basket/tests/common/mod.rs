@@ -9,9 +9,11 @@
 
 pub mod ed25519_stub;
 pub mod fees;
+pub mod managed;
 pub mod redeem;
 pub mod sleeve;
 
+pub use managed::*;
 pub use redeem::*;
 pub use sleeve::*;
 
