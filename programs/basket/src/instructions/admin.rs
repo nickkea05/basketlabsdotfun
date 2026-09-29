@@ -56,6 +56,8 @@ pub fn handle_initialize_config(
     config.close_idle_s = DEFAULT_CLOSE_IDLE_S;
     config.graduation_lamports = DEFAULT_GRADUATION_LAMPORTS;
     config.scheduler = LaunchScheduler::default();
+    config.swap_programs = vec![JUPITER_V6_ID];
+    config.rebalance_tolerance_bps = DEFAULT_REBALANCE_TOLERANCE_BPS;
     apply_update(config, update)?;
 
     let whitelist = &mut ctx.accounts.whitelist;
@@ -109,6 +111,14 @@ fn apply_update(config: &mut Config, u: ConfigUpdate) -> Result<()> {
     if let Some(v) = u.scheduler {
         require!(v.cliff_bps <= 9_900 && v.period_s > 0, BasketError::InvalidArgument);
         config.scheduler = v;
+    }
+    if let Some(v) = u.swap_programs {
+        require!(v.len() <= MAX_SWAP_PROGRAMS, BasketError::InvalidArgument);
+        config.swap_programs = v;
+    }
+    if let Some(v) = u.rebalance_tolerance_bps {
+        require!(v <= BPS_TOTAL, BasketError::InvalidArgument);
+        config.rebalance_tolerance_bps = v;
     }
     Ok(())
 }

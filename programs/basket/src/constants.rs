@@ -64,6 +64,12 @@ pub const SHARE_DECIMALS: u8 = 6;
 
 /// Keeper set size cap (D17: "small rotatable signer set").
 pub const MAX_KEEPERS: usize = 8;
+/// Swap venues `execute_swap` may route through.
+pub const MAX_SWAP_PROGRAMS: usize = 4;
+/// Jupiter v6 aggregator.
+pub const JUPITER_V6_ID: Pubkey = Pubkey::from_str_const("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+/// Default slack on the weight-derived per-position sell cap (5%).
+pub const DEFAULT_REBALANCE_TOLERANCE_BPS: u16 = 500;
 
 /// Fee split, holders / creator / protocol (§4). Initial `Config` values.
 pub const DEFAULT_HOLDER_SPLIT_BPS: u16 = 4_000;

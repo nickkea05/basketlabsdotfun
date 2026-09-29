@@ -8,11 +8,13 @@
 #![allow(dead_code)]
 
 pub mod ed25519_stub;
+pub mod books;
 pub mod fees;
 pub mod managed;
 pub mod redeem;
 pub mod sleeve;
 
+pub use books::*;
 pub use managed::*;
 pub use redeem::*;
 pub use sleeve::*;

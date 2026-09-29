@@ -136,11 +136,19 @@ impl Default for PriceRange {
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, Debug, Default, PartialEq, Eq)]
 pub struct Rebalance {
     pub active: bool,
-    /// Chain hash of the target book.
+    /// Incremented every time a rebalance starts; scopes `Position.sold`.
+    pub seq: u16,
+    /// Chain hash of the target book (the `PendingBook` holds the list).
     pub target_hash: [u8; 32],
     pub target_count: u16,
+    /// `execute_swap` is allowed until here; `finalize_rebalance` any time.
     pub window_end_ts: i64,
-    /// Managed turnover accounting: bps of NAV turned over in the window.
+    /// `finalize_rebalance` progress: entries processed so far, running
+    /// chain hash and weight sum over them.
+    pub acc_count: u16,
+    pub acc_hash: [u8; 32],
+    pub acc_weight: u16,
+    /// Managed turnover accounting: bps of the book turned over in the window.
     pub turnover_window_start_ts: i64,
     pub turnover_used_bps: u16,
 }

@@ -2,6 +2,7 @@
 //! `handle_<instruction>` and called from the `#[program]` module in lib.rs.
 
 pub mod admin;
+pub mod books;
 pub mod create_basket;
 pub mod crystallize;
 pub mod fees;
@@ -12,6 +13,7 @@ pub mod seed;
 pub mod sleeve;
 
 pub use admin::*;
+pub use books::*;
 pub use create_basket::*;
 pub use crystallize::*;
 pub use fees::*;

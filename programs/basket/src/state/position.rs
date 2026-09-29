@@ -20,6 +20,11 @@ pub struct Position {
     /// Order in which the position entered the book; the chain hash follows
     /// this order.
     pub index: u16,
+    /// Rebalance in which `sold` was last accumulated (`Basket.rebalance.seq`).
+    pub rebalance_seq: u16,
+    /// Amount sold out of this vault by `execute_swap` during that rebalance
+    /// (the per-position sell cap is cumulative over the window).
+    pub sold: u64,
 }
 
 impl Position {

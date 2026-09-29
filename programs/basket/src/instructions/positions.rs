@@ -50,83 +50,9 @@ pub fn append_positions<'info>(
         );
     }
 
-    let basket_key = basket.key();
-    let share_mint = basket.share_mint;
     for (i, arg) in positions.iter().enumerate() {
-        let mint_ai = &remaining[i * 3];
-        let pos_ai = &remaining[i * 3 + 1];
-        let vault_ai = &remaining[i * 3 + 2];
-
-        require_keys_eq!(mint_ai.key(), arg.mint, BasketError::ComponentMismatch);
-        require!(arg.weight_bps > 0, BasketError::InvalidArgument);
-        require!(whitelist.contains(&arg.mint), BasketError::MintNotWhitelisted);
-        let token_program = token_program_for_mint(mint_ai)?;
-        let decimals = {
-            let data = mint_ai.try_borrow_data()?;
-            Mint::try_deserialize(&mut &data[..])?.decimals
-        };
-
-        let (pos_key, pos_bump) = Pubkey::find_program_address(
-            &[seeds::POSITION, share_mint.as_ref(), arg.mint.as_ref()],
-            &crate::ID,
-        );
-        require_keys_eq!(pos_ai.key(), pos_key, BasketError::ComponentMismatch);
-        require!(
-            pos_ai.data_is_empty() && pos_ai.lamports() == 0,
-            BasketError::DuplicateMint
-        );
-
-        let vault = get_associated_token_address_with_program_id(&basket_key, &arg.mint, &token_program);
-        require_keys_eq!(vault_ai.key(), vault, BasketError::ComponentMismatch);
-
-        // Position account.
-        let space = 8 + Position::INIT_SPACE;
-        let lamports = Rent::get()?.minimum_balance(space);
-        invoke_signed(
-            &system_instruction::create_account(
-                programs.payer.key,
-                &pos_key,
-                lamports,
-                space as u64,
-                &crate::ID,
-            ),
-            &[programs.payer.clone(), pos_ai.clone(), programs.system_program.clone()],
-            &[&[seeds::POSITION, share_mint.as_ref(), arg.mint.as_ref(), &[pos_bump]]],
-        )?;
         let index = basket.position_count;
-        let position = Position {
-            bump: pos_bump,
-            basket: basket_key,
-            mint: arg.mint,
-            weight_bps: arg.weight_bps,
-            token_program,
-            decimals,
-            vault,
-            owed: 0,
-            index,
-        };
-        {
-            let mut data = pos_ai.try_borrow_mut_data()?;
-            position.try_serialize(&mut &mut data[..])?;
-        }
-
-        // Vault ATA (idempotent: someone may have pre-created it).
-        let tp = if token_program == anchor_spl::token::ID {
-            programs.token_program
-        } else {
-            programs.token_2022_program
-        };
-        associated_token::create_idempotent(CpiContext::new(
-            programs.associated_token_program.key(),
-            associated_token::Create {
-                payer: programs.payer.clone(),
-                associated_token: vault_ai.clone(),
-                authority: basket.to_account_info(),
-                mint: mint_ai.clone(),
-                system_program: programs.system_program.clone(),
-                token_program: tp.clone(),
-            },
-        ))?;
+        create_position(basket, whitelist, programs, &remaining[i * 3..i * 3 + 3], arg, index)?;
 
         basket.book_acc = Basket::chain_hash(&basket.book_acc, &arg.mint, arg.weight_bps);
         basket.weight_acc = basket
@@ -141,6 +67,81 @@ pub fn append_positions<'info>(
             .ok_or_else(|| error!(BasketError::TooManyAssets))?;
     }
     Ok(positions.len() as u16)
+}
+
+/// Create one `Position` PDA + vault ATA from a `[mint, position, vault]`
+/// account triplet. Verifies whitelist membership, the token program, the
+/// PDA and the ATA addresses. Does not touch the basket's book accumulators
+/// (callers decide whether this is the initial book or a rebalance).
+pub fn create_position<'info>(
+    basket: &Account<'info, Basket>,
+    whitelist: &Whitelist,
+    programs: &PositionPrograms<'_, 'info>,
+    group: &[AccountInfo<'info>],
+    arg: &PositionArg,
+    index: u16,
+) -> Result<()> {
+    require!(group.len() == 3, BasketError::ComponentCountMismatch);
+    let (mint_ai, pos_ai, vault_ai) = (&group[0], &group[1], &group[2]);
+    let basket_key = basket.key();
+    let share_mint = basket.share_mint;
+
+    require_keys_eq!(mint_ai.key(), arg.mint, BasketError::ComponentMismatch);
+    require!(arg.weight_bps > 0, BasketError::InvalidArgument);
+    require!(whitelist.contains(&arg.mint), BasketError::MintNotWhitelisted);
+    let token_program = token_program_for_mint(mint_ai)?;
+    let decimals = {
+        let data = mint_ai.try_borrow_data()?;
+        Mint::try_deserialize(&mut &data[..])?.decimals
+    };
+
+    let (pos_key, pos_bump) =
+        Pubkey::find_program_address(&[seeds::POSITION, share_mint.as_ref(), arg.mint.as_ref()], &crate::ID);
+    require_keys_eq!(pos_ai.key(), pos_key, BasketError::ComponentMismatch);
+    require!(pos_ai.data_is_empty() && pos_ai.lamports() == 0, BasketError::DuplicateMint);
+
+    let vault = get_associated_token_address_with_program_id(&basket_key, &arg.mint, &token_program);
+    require_keys_eq!(vault_ai.key(), vault, BasketError::ComponentMismatch);
+
+    // Position account.
+    let space = 8 + Position::INIT_SPACE;
+    let lamports = Rent::get()?.minimum_balance(space);
+    invoke_signed(
+        &system_instruction::create_account(programs.payer.key, &pos_key, lamports, space as u64, &crate::ID),
+        &[programs.payer.clone(), pos_ai.clone(), programs.system_program.clone()],
+        &[&[seeds::POSITION, share_mint.as_ref(), arg.mint.as_ref(), &[pos_bump]]],
+    )?;
+    let position = Position {
+        bump: pos_bump,
+        basket: basket_key,
+        mint: arg.mint,
+        weight_bps: arg.weight_bps,
+        token_program,
+        decimals,
+        vault,
+        owed: 0,
+        index,
+        rebalance_seq: 0,
+        sold: 0,
+    };
+    {
+        let mut data = pos_ai.try_borrow_mut_data()?;
+        position.try_serialize(&mut &mut data[..])?;
+    }
+
+    // Vault ATA (idempotent: someone may have pre-created it).
+    let tp = if token_program == anchor_spl::token::ID { programs.token_program } else { programs.token_2022_program };
+    associated_token::create_idempotent(CpiContext::new(
+        programs.associated_token_program.key(),
+        associated_token::Create {
+            payer: programs.payer.clone(),
+            associated_token: vault_ai.clone(),
+            authority: basket.to_account_info(),
+            mint: mint_ai.clone(),
+            system_program: programs.system_program.clone(),
+            token_program: tp.clone(),
+        },
+    ))
 }
 
 /// Once every position is in, the running hash and weight sum must match the

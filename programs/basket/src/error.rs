@@ -99,4 +99,16 @@ pub enum BasketError {
     RedemptionPending,
     #[msg("Crystallization period has not elapsed")]
     CrystallizeTooSoon,
+    #[msg("A rebalance is in progress")]
+    RebalanceActive,
+    #[msg("Position vault is not empty")]
+    PositionNotEmpty,
+    #[msg("Positions leaving the book must be closed before finalizing")]
+    PositionsNotClosed,
+    #[msg("Sell exceeds the per-position cap for this rebalance")]
+    SellCapExceeded,
+    #[msg("Swap program not allowed")]
+    SwapProgramNotAllowed,
+    #[msg("Swap touches a basket account other than the declared vaults")]
+    UnexpectedAccountInSwap,
 }

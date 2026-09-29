@@ -121,4 +121,48 @@ pub mod basket {
     pub fn crystallize(ctx: Context<Crystallize>, nav_lamports_per_share: u64) -> Result<()> {
         handle_crystallize(ctx, nav_lamports_per_share)
     }
+
+    // ---- books / rebalance (D17, D20) ----
+
+    /// Propose a new book. Mirror/Strategy: keeper, window opens now.
+    /// Managed: creator, timelocked until `apply_book`. Remaining accounts:
+    /// `[mint, position, vault]` per entering mint.
+    pub fn submit_book<'info>(ctx: Context<'info, SubmitBook<'info>>, book: Vec<PositionArg>) -> Result<()> {
+        handle_submit_book(ctx, book)
+    }
+
+    /// Create the Position + vault for a pending-book mint. Anyone.
+    pub fn open_position<'info>(ctx: Context<'info, OpenPosition<'info>>) -> Result<()> {
+        handle_open_position(ctx)
+    }
+
+    /// Managed: open the window on the pending book once the timelock has
+    /// passed and the turnover fits the cap. Anyone.
+    pub fn apply_book(ctx: Context<ApplyBook>, current_book: Vec<PositionArg>) -> Result<()> {
+        handle_apply_book(ctx, current_book)
+    }
+
+    /// Keeper: route one swap through an allow-listed venue with the
+    /// basket as authority. Remaining accounts: the inner instruction's.
+    pub fn execute_swap<'info>(
+        ctx: Context<'info, ExecuteSwap<'info>>,
+        amount_in: u64,
+        min_amount_out: u64,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        handle_execute_swap(ctx, amount_in, min_amount_out, data)
+    }
+
+    /// Keeper: remove an emptied position that left the book.
+    pub fn close_position(ctx: Context<ClosePosition>) -> Result<()> {
+        handle_close_position(ctx)
+    }
+
+    /// Keeper: walk the target book (chunked); the last chunk flips the book.
+    pub fn finalize_rebalance<'info>(
+        ctx: Context<'info, FinalizeRebalance<'info>>,
+        entries: Vec<PositionArg>,
+    ) -> Result<()> {
+        handle_finalize_rebalance(ctx, entries)
+    }
 }

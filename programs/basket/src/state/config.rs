@@ -29,11 +29,21 @@ pub struct Config {
     pub close_idle_s: i64,
     pub graduation_lamports: u64,
     pub scheduler: LaunchScheduler,
+    /// Programs `execute_swap` may CPI into with the basket as authority
+    /// (Jupiter v6 on mainnet). Empty = no swaps possible.
+    #[max_len(MAX_SWAP_PROGRAMS)]
+    pub swap_programs: Vec<Pubkey>,
+    /// Slack on the weight-derived per-position sell cap during a rebalance.
+    pub rebalance_tolerance_bps: u16,
 }
 
 impl Config {
     pub fn is_keeper(&self, key: &Pubkey) -> bool {
         self.keepers.iter().any(|k| k == key)
+    }
+
+    pub fn allows_swap_program(&self, key: &Pubkey) -> bool {
+        self.swap_programs.iter().any(|k| k == key)
     }
 }
 
@@ -232,4 +242,6 @@ pub struct ConfigUpdate {
     pub close_idle_s: Option<i64>,
     pub graduation_lamports: Option<u64>,
     pub scheduler: Option<LaunchScheduler>,
+    pub swap_programs: Option<Vec<Pubkey>>,
+    pub rebalance_tolerance_bps: Option<u16>,
 }

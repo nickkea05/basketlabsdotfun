@@ -94,6 +94,9 @@ pub fn handle_mint<'info>(ctx: Context<'info, MintShares<'info>>, args: MintArgs
         let basket = &ctx.accounts.basket;
         require!(basket.seeded, BasketError::NotSeeded);
         require!(basket.gate_open_at(now), BasketError::MintGateClosed);
+        // Vault ratios are in flux while positions are being traded; a
+        // deposit priced off them would be wrong for either side.
+        require!(!basket.rebalance.active, BasketError::RebalanceActive);
     }
 
     // 1. Shares from the vaults *before* the deposit (creation-unit rule).

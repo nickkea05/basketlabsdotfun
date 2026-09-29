@@ -36,7 +36,11 @@ pub struct FeeVault {
 pub struct PendingBook {
     pub bump: u8,
     pub basket: Pubkey,
+    /// Who paid the rent (creator or keeper); refunded when the book is
+    /// finalized or replaced.
+    pub payer: Pubkey,
     pub submitted_at: i64,
+    /// Managed: `submitted_at + timelock`. Others: `submitted_at`.
     pub ready_at: i64,
     pub book_hash: [u8; 32],
     #[max_len(PendingBook::MAX_BOOK)]
@@ -45,6 +49,10 @@ pub struct PendingBook {
 
 impl PendingBook {
     pub const MAX_BOOK: usize = 64;
+
+    pub fn weight_of(&self, mint: &Pubkey) -> Option<u16> {
+        self.book.iter().find(|p| p.mint == *mint).map(|p| p.weight_bps)
+    }
 }
 
 /// `["claim", share_mint, wallet, mint]`. D10.
