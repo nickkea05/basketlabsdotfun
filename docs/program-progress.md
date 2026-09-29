@@ -5,7 +5,7 @@ Living log for the `basket` Anchor program build. Spec is
 written before handlers, LiteSVM, one test file per instruction, and any design
 question the spec leaves open gets **asked, not decided** (collected in §5 below).
 
-Last updated: 2026-09-28 (end of session, mid Phase 3).
+Last updated: 2026-09-28 (Phase 6 done and pushed, `ccf2364`).
 
 ---
 
@@ -14,108 +14,112 @@ Last updated: 2026-09-28 (end of session, mid Phase 3).
 | Phase | Scope | State |
 | --- | --- | --- |
 | 0 | Workspace, spike (`declare_program!(cp_amm)`, anchor-spl metadata, U256 math under SBF) | done |
-| 1 | `initialize_config`, `update_whitelist`, `create_basket` (ed25519 introspection, chain-hash book, replay binding), `add_positions` | done, tests green |
-| 2 | `seed` + `mint` with DAMM v2 CPI, sleeve step rule, treasury-share accounting | done, tests green |
-| 3 | `redeem`, `redeem_begin` / `redeem_components`, `claim_frozen` (FrozenClaim) | **written, not yet compiled or run** |
-| 4 | FeeVault, `claim_pool_fees`, `sweep_fees`, 40/30/30 split | not started |
-| 5 | `crystallize` + HWM, management fee (gates/schedules already enforced in mint) | not started |
-| 6 | `submit_book` / `apply_book` / `execute_swap` (Jupiter CPI) / `finalize_rebalance` | not started |
+| 1 | `initialize_config`, `update_whitelist`, `create_basket` (ed25519 introspection, chain-hash book, replay binding), `add_positions` | done, green |
+| 2 | `seed` + `mint` with DAMM v2 CPI, sleeve step rule, treasury-share accounting | done, green |
+| 3 | `redeem`, `redeem_begin` / `redeem_components`, `claim_frozen` (FrozenClaim) | done, green (`de7a4b1`) |
+| 4 | FeeVault, `claim_pool_fees`, `sweep_fees`, 40/30/30 split | done, green (`4abcb7d`) |
+| 5 | `crystallize` + HWM, management fee (gates/schedules already enforced in mint) | done, green (`9b952a4`) |
+| 6 | `submit_book` / `open_position` / `apply_book` / `execute_swap` / `close_position` / `finalize_rebalance` | done, green (`ccf2364`) |
 | 7 | `post_rewards_root` / `distribute_rewards`, creator lock/unlock, `close_basket`, admin | not started |
-| wrap | `scripts/fetch-fixtures.ps1`, gitignore `*.so` fixtures, README/TODO, present §5 to Nick | not started |
+| wrap | README/TODO refresh, present §5 to Nick | partly (fixtures script + gitignore done) |
 
-Last known green run (before Phase 3 edits): **38/38** — unit 6, add_positions 4,
-create_basket 6, initialize_config 6, mint 6, seed 5, smoke 2, update_whitelist 3.
+Last green run: **74/74** — unit 6, add_positions 4, apply_book 3, claim_pool_fees 3,
+create_basket 6, crystallize 6, execute_swap 4, finalize_rebalance 4,
+initialize_config 6, mint 6, redeem 6, seed 5, smoke 2, submit_book 5, sweep_fees 5,
+update_whitelist 3.
 
-## 2. Restart checklist (do this first tomorrow)
+## 2. Restart checklist
 
 From `c:\dev\ponsclone\basketfun`:
 
-1. `anchor build` — expect compile errors in the brand-new
-   `programs/basket/src/instructions/redeem.rs`. It was written blind against the
-   harness; nothing in it has been through the compiler yet. Things most likely to
-   need touching:
-   - `BasketSigner::new(&basket)` — confirm the constructor name/signature in
-     `sleeve.rs` (may be a different helper; `seed.rs`/`mint.rs` show the real one).
-   - `ComponentAccounts` field names used: `position`, `position_ai`, `vault`,
-     `user_ata`, `mint`, `available`, `vault_frozen`, `user_frozen`. Check against
-     `positions.rs`; `position_ai` (the raw AccountInfo for the Position PDA,
-     needed to write back `owed`) may not exist yet and needs adding.
-   - `math::liquidity_share(liquidity, net, h)` and
-     `math::component_for_shares(net, available, h, Rounding::Down)` — confirm names
-     in `math.rs`; add if missing (`L·net/H` floor, `available·net/H` floor).
-   - `Redemption` fields assumed: `bump, basket, holder, shares, position_count,
-     paid_count, paid_mints: Vec<Pubkey>, created_at`. `FrozenClaim` fields assumed:
-     `bump, basket, wallet, mint, amount, created_at`. Check `state/`; if
-     `paid_mints` is not there, add it (with `#[max_len(...)]`) or switch the
-     duplicate check to a bitmap.
-   - Seeds constants assumed: `seeds::REDEMPTION`, `seeds::CLAIM`, `seeds::FEES`,
-     `seeds::POSITION`, `seeds::BASKET`. Harness uses `["claim", share_mint, wallet,
-     mint]` and `["redemption", share_mint, holder]`.
-   - Errors assumed: `NotSeeded`, `PoolMismatch`, `ComponentFrozen`, `DuplicateMint`,
-     `ComponentMismatch`, `ZeroAmount`, `MathOverflow`.
-   - `damm::position_nft_account`, `damm::pool_authority`, `damm::token_vault`,
-     `damm::event_authority` — same helpers `seed.rs`/`mint.rs` use; match names.
-   - `read_token_amount` is imported from `positions.rs`; may live elsewhere.
-   - `Basket::touch(now)` — exists if create/mint use it, otherwise drop the calls.
-2. `cargo.exe test -p basket --test redeem -- --test-threads=1 --nocapture`
-   (`tests/redeem.rs`, 6 tests, never run). Then the full suite:
-   `cargo.exe test -p basket -- --test-threads=1`.
-3. Windows notes: use `cargo.exe` explicitly (a stray 0-byte `C:\Windows\system32\cargo`
-   file triggers an "open with" popup otherwise). Intermittent `LNK1104 cannot open
-   file ...exe` during `anchor build` is a file-lock race (McAfee) — just rerun.
+1. Move stale test exes out of the way (McAfee holds them → `LNK1104`):
+   `Get-ChildItem target\debug\deps\*.exe | Move-Item -Destination $env:TEMP\stale -Force`
+2. `anchor build` — if the IDL step fails with a link error, repeat step 1 and rerun.
+3. `cargo.exe test -p basket --no-fail-fast -- --test-threads=1` (always `cargo.exe`:
+   a stray 0-byte `C:\Windows\system32\cargo` triggers an "open with" popup).
+4. Next up: Phase 7. Start by writing `tests/rewards.rs`, `tests/creator_lock.rs`,
+   `tests/close_basket.rs` against the harness, then the handlers. State already
+   exists: `RewardsRoot` (bitmap, `leaf`, `verify`), `CreatorLock`, `FeeVault`
+   `holder_reserve_*` / `distributed_*`, events `RewardsRootPosted`,
+   `RewardDistributed`, `CreatorSharesLocked/Unlocked`, `BasketClosed`, errors
+   `BadProof`, `AlreadyClaimed`, `LockActive`, `NotClosable`.
 
-## 3. What changed this session (Phase 2 → 3)
+## 3. Design as built (phases 3–6)
 
-Program (`programs/basket/src/`):
+### Redeem (Phase 3)
+- Gross `shares` from holder; fee (`fees.redeem_fee_bps`) transferred as shares to
+  the FeeVault share ATA, net burned. No gate, no pause check (D9).
+- `H = supply − position_shares (rounded UP) + pending_redeem_shares`. Round-up
+  mirrors cp-amm's deposit rounding so `H` is exact.
+- Pool leg: `remove_liquidity(L·net/H)`, `token_b_account` = holder wSOL ATA
+  (created idempotently, closed to SOL if we created it), `token_a_account` = basket
+  share ATA, then burned (treasury shares).
+- Components: `available·net/H` per leg (`available = vault − Position.owed`).
+  Frozen vault or frozen holder ATA → `FrozenClaim` PDA (rent from holder),
+  `Position.owed += amount`; `claim_frozen` pays it later.
+- `redeem_begin` / `redeem_components(count)` for big books via `Redemption` PDA;
+  `pending_redeem_shares` keeps the denominator exact between the two.
 
-- `instructions/redeem.rs` (new) — `Redeem`, `RedeemBegin`, `RedeemComponents`,
-  `ClaimFrozen` account structs + handlers. Design:
-  - Gross `shares` from holder: fee (`fees.redeem_fee_bps`) transferred as shares to
-    the FeeVault share ATA, **net burned**. No gate, no pause check (D9).
-  - `H = supply − shares in our pool position + pending_redeem_shares`, read before
-    the burn.
-  - Pool leg: `remove_liquidity(L·net/H)` with `token_b_account = holder's wSOL ATA`
-    (created idempotently, closed to SOL if we created it) and `token_a_account =
-    basket share ATA`, whose contents are then burned (treasury shares).
-  - Components: `available·net/H` per leg (`available = vault − Position.owed`),
-    `transfer_checked` from vault (basket PDA signer). Frozen vault or frozen holder
-    ATA → find the `FrozenClaim` PDA among trailing remaining accounts (missing →
-    `ComponentFrozen`), create/top-up it (rent from holder), `Position.owed += amount`.
-  - `redeem_begin`: burn + fee + pool leg, opens `Redemption { shares: net,
-    position_count, paid_count: 0, paid_mints: [] }`, `pending_redeem_shares += net`.
-    `redeem_components(count)`: pays the first `count` component groups from
-    remaining accounts, rejects mints already paid (`DuplicateMint`), closes the
-    Redemption and decrements `pending_redeem_shares` once `paid_count >=
-    position_count`.
-  - `claim_frozen`: transfers `claim.amount` from vault to wallet ATA (created if
-    missing), `Position.owed −= amount`, closes the claim to the wallet.
-- `instructions/mint.rs` — creation-unit rule now prices off `c.available` (vault −
-  owed) instead of raw vault balance; imports `COMPONENT_GROUP`; exact remaining
-  account length check `n * COMPONENT_GROUP`.
-- `instructions/positions.rs` — `ComponentAccounts.available`,
-  `ComponentAccounts::trailing(remaining, n)`, and
-  `load_components(basket_key, remaining, n)` (parses first `n` groups, requires
-  `remaining.len() >= n*4`).
-- `instructions/mod.rs`, `lib.rs` — `redeem(shares)`, `redeem_begin(shares)`,
-  `redeem_components(count: u16)`, `claim_frozen()` wired.
+### Fees (Phase 4)
+- Mint/redeem fee shares sit unsplit in the FeeVault share ATA. Pool swap fees
+  (`OnlyB` = SOL side) are claimed by `claim_pool_fees` (anyone) through a temporary
+  wSOL ATA that is closed onto the FeeVault PDA as native SOL; rent back to cranker.
+- `sweep_fees` (anyone) splits new shares + SOL by the basket-frozen 40/30/30;
+  holder line stays in the vault as `holder_reserve_*` for `distribute_rewards`;
+  creator SOL is held back in `creator_owed_lamports` if paying it would leave the
+  creator wallet below rent exemption (a sweep never reverts on creator state).
 
-Tests (`programs/basket/tests/`):
+### Managed fees (Phase 5)
+- `crystallize(nav_lamports_per_share)`: keeper-signed NAV attestation (lamports per
+  whole share, `SHARE_DECIMALS = 6`), once per `crystallize_period_s`.
+- Management fee `s = H·f/(1−f)`, `f = bps·elapsed/year`, accrued at `crystallize`
+  and `apply_book` (`accrue_mgmt_fee`).
+- Performance fee `s = perf·(nav−hwm)·H/(nav − perf·(nav−hwm))` (dilution-correct);
+  HWM moves to the post-fee `diluted_nav`. `seed` sets the opening HWM to
+  `(implied_total − creation_fee)·1e6/initial_shares`.
 
-- `redeem.rs` (new, unrun): `redeem_pays_pro_rata_components_and_sleeve`,
-  `redeem_is_never_gated_or_paused`, `redeem_validations`,
-  `frozen_component_is_skipped_into_a_claim`, `two_step_redeem_for_large_books`
-  (N=9, chunks `[..5]`, `[5..]`), `redeem_account_counts_and_cu_by_size`.
-- `common/redeem.rs` (new, unrun) — ix builders + `freeze`/`thaw` helpers;
-  `RedeemComponents { count: chunk.len() }` now matches the program.
-- `common/mod.rs` — freezable mints (`create_mint_with_freeze`,
-  `launch_fixed_freezable`), `launch_partial`, `set_paused`; every tx gets
-  `SetComputeUnitLimit(1_400_000)` appended last.
+### Books / rebalance (Phase 6)
+- `PendingBook { payer, submitted_at, ready_at, book_hash, book: Vec<PositionArg> ≤ 64 }`
+  holds the target list for every mutable type. Rent to the submitter, refunded at
+  `finalize_rebalance`; a replaced book keeps the original payer.
+- `submit_book`: Managed → creator, others → keeper; Fixed → `ImmutableBasket`.
+  Validates weights (>0, no dupes, Σ = 10_000, whitelisted). Refused while a window
+  is open; an *expired* window is abandoned and the new target starts `seq + 1`.
+  Optional remaining `[mint, position, vault]` triplets create Positions for entering
+  mints (weights from the book, `index = position_count++`). Mirror/Strategy open the
+  window immediately (`window_end = now + config.rebalance_window_s`); Managed sets
+  `ready_at = now + timelock`.
+- `open_position` (anyone): same Position creation for a pending-book mint that was
+  not passed at submit. `OffBook` if not in the pending book, `DuplicateMint` if it
+  exists.
+- `apply_book(current_book)`: Managed only, anyone may call after `ready_at`. Caller
+  supplies the live book, checked against `book_hash`. Turnover `Σ|Δw|/2` against
+  `managed.turnover_cap_bps` per `turnover_window_s` (window starts at first apply,
+  resets when expired). Management fee accrues (pre-trade H). Window opens.
+- `execute_swap(amount_in, min_amount_out, data)`: keeper, inside the window, venue in
+  `Config.swap_programs` (default Jupiter v6; tests allow cp-amm). Remaining accounts
+  are re-issued as the inner instruction with the basket PDA as signer. Guards:
+  no other basket-owned token account in the inner account list
+  (`UnexpectedAccountInSwap`), basket lamports may not fall, `in_vault` drops by at
+  most `amount_in`, `out_vault` rises by at least `min_amount_out`, out mint must be
+  in the target (`OffBook`), cumulative per-position sell cap
+  `(w_old − w_new)/w_old + tolerance` (tolerance alone when weight rises; 100% when
+  leaving) on `vault_before + sold_so_far`, scoped by `Position.rebalance_seq`.
+- `close_position`: keeper, rebalance active, mint not in target, vault and `owed`
+  empty; closes vault + Position, rent → `basket.payer`, `position_count −= 1`.
+- `finalize_rebalance(entries)`: keeper, chunkable. Remaining `[position]` per entry;
+  sets `weight_bps`/`index`, walks `acc_hash/acc_count/acc_weight`. Over-count →
+  `BookHashMismatch`. Last chunk: `position_count == target_count` (else
+  `PositionsNotClosed`), `acc_hash == target_hash`, `acc_weight == 10_000`; then
+  `book_hash`/`book_acc`/`asset_count` flip, `rebalance.active = false`, PendingBook
+  closed to its payer. A wrong earlier chunk can only be recovered by letting the
+  window expire and resubmitting (acc is reset by `submit_book`).
+- `mint` is refused while `rebalance.active` (`RebalanceActive`); `redeem` is not.
 
 ## 4. Measurements and hard limits (keep in README)
 
-- Mainnet **64 account-lock limit** (`increase_tx_account_lock_limit` not active):
-  single-tx `seed` N ≤ 9 (26 fixed + 4N), `mint` N ≤ 10 (23 fixed + 4N). N=10 seed
-  → `TooManyAccountLocks` (tested).
+- Mainnet **64 account-lock limit**: single-tx `seed` N ≤ 9 (26 fixed + 4N), `mint`
+  N ≤ 10 (23 fixed + 4N). N=10 seed → `TooManyAccountLocks` (tested).
 - **Instruction trace limit 64** → ≤ 8 positions per `create_basket` /
   `add_positions` tx (`POSITIONS_PER_TX = 8`); harness chunks automatically.
 - Default 200k CU is not enough anywhere with CPI; tests request 1.4M.
@@ -123,19 +127,21 @@ Tests (`programs/basket/tests/`):
 - seed N=2/5/8/9: 34/46/58/62 accounts, 269k/331k/323k/362k CU; rent+fees ≈ 0.032 SOL
   paid by the first buyer.
 - mint N=2/5/8/9: 30/42/54/58 accounts, 121k/134k/149k/164k CU.
-- Meteora cp-amm: creator = basket PDA (owns position NFT), payer = buyer (system
-  program refuses to debit a data-carrying PDA); base fee layout is
-  PodAlignedFeeTimeScheduler (cliff u64@0, mode u8@8, periods u16@14,
-  period_frequency u64@16, reduction_factor u64@24); scheduler ≤ 1 day; protocol
-  takes 20% of swap fees before our split.
+- redeem N=2/5/8/9: 30/42/54/58 accounts, 118k/151k/160k/169k CU; redeem_begin 124k;
+  redeem_components(5) 52k.
+- claim_pool_fees ≈ 80–85k; sweep_fees small; crystallize 47k.
+- submit_book (1 new position) 51k; apply_book 44k; execute_swap (cp-amm inner) 38k;
+  finalize_rebalance(3) 19k.
+- Meteora cp-amm: creator = basket PDA (owns position NFT), payer = buyer; base fee
+  layout is PodAlignedFeeTimeScheduler; scheduler ≤ 1 day; protocol takes 20% of swap
+  fees before our split.
 - Sleeve geometry: SOL leg `B = r·D` is primary, pool price = NAV; share side follows
   the range (≈2.207× nominal for Bounded [0.5×, 8×], 3.414× FloorOnly, 1× Full).
 
 ## 5. Open design questions for Nick (not decided — flagged)
 
 Places where the spec was silent and I picked a placeholder so work could continue.
-Each is easy to change; none are baked into account layouts that other phases depend
-on yet, except (a) and (e).
+Each is easy to change; (a), (e), (t)–(v) touch account layouts.
 
 - (a) Mint/redeem fees are withheld **as shares into the FeeVault share ATA**, not
   skimmed per component. Simpler, one token; is that the intent of §4?
@@ -163,3 +169,24 @@ on yet, except (a) and (e).
 - (r) Redeem fee also applies to `redeem_begin` (two-step path) — same bps.
 - (s) `claim_frozen` requires the vault to be thawed; if a token is frozen forever the
   claim is stranded. Sunset path is post-launch per TODO.md.
+- (t) Pool swap fees are held as **native SOL on the FeeVault PDA** (not a wSOL ATA);
+  `claim_pool_fees` and `sweep_fees` are permissionless cranks.
+- (u) Creator SOL line is held back (`creator_owed_lamports`) when the creator wallet
+  would end below rent exemption, paid on a later sweep.
+- (v) `crystallize` is **keeper co-signed** (NAV attestation); the program never
+  prices (D4). HWM is set to the **post-fee** NAV; mgmt fee accrues at `crystallize`
+  and `apply_book` only (not on every mint/redeem).
+- (w) Swap venue: generic CPI hook with a **Config allow-list** (Jupiter v6 default,
+  ≤ 4 programs) rather than a hard-wired Jupiter interface; keeper builds the inner
+  instruction; program guards vault deltas.
+- (x) Turnover and sell caps are **weight-based** (Σ|Δw|/2; per-position
+  `(w_old−w_new)/w_old + 5% tolerance`), not value-based — the program has no prices.
+- (y) `mint` blocked while a rebalance is active; `redeem` allowed (pays whatever the
+  vaults hold, including half-traded positions).
+- (z) New-mint Positions are created at `submit_book` / `open_position` (before any
+  trade) so redeem always pays out every basket-held token; `close_position` requires
+  an empty vault; leftover dust would block finalize until swept.
+- (aa) Finalize checks structure (hash, weights, count) not value; there is no
+  on-chain check that vault values actually match the new weights.
+- (ab) A rebalance whose window expired without `finalize_rebalance` keeps `mint`
+  blocked until the keeper finalizes or resubmits; only the keeper can unstick it.
