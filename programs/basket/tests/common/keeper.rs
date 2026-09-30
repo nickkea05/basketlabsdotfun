@@ -71,7 +71,7 @@ impl Env {
     /// The backstop position PDA for the placement above (`base` = share_auth).
     pub fn backstop_position_for(&self, l: &Launched) -> Pubkey {
         let (lower, upper, _, _) = self.backstop_placement(l);
-        dlmm::position_pda(&l.pool.lb_pair, &share_auth_pda(&l.share_mint), lower, upper - lower + 1)
+        dlmm::basket_position_pda(&l.pool.lb_pair, &share_auth_pda(&l.share_mint), lower, upper)
     }
 
     pub fn place_backstop_ix(&self, l: &Launched, keeper: &Pubkey) -> Instruction {
@@ -143,7 +143,7 @@ impl Env {
     /// The tight position `recenter_tight` will open around `active_id`.
     pub fn new_tight_for(&self, l: &Launched, active_id: i32) -> (Pubkey, i32, i32) {
         let (lower, upper) = self.tight_range_at(l, active_id);
-        (dlmm::position_pda(&l.pool.lb_pair, &l.basket, lower, upper - lower + 1), lower, upper)
+        (dlmm::basket_position_pda(&l.pool.lb_pair, &l.basket, lower, upper), lower, upper)
     }
 
     pub fn recenter_tight_ix(&self, l: &Launched, keeper: &Pubkey) -> Instruction {

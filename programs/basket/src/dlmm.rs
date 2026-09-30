@@ -295,7 +295,9 @@ pub fn bin_array(lb_pair: &Pubkey, index: i64) -> Pubkey {
 }
 
 /// `["position", lb_pair, base, lower_bin_id_le_i32, width_le_i32]`
-/// (`initialize_position_pda`).
+/// (`initialize_position_pda`). `width` is the width the position is
+/// created with (≤ `DEFAULT_BIN_PER_POSITION`), not its final width after
+/// `increase_position_length2`; see `basket_position_pda`.
 pub fn position_pda(lb_pair: &Pubkey, base: &Pubkey, lower_bin_id: i32, width: i32) -> Pubkey {
     Pubkey::find_program_address(
         &[
@@ -308,6 +310,13 @@ pub fn position_pda(lb_pair: &Pubkey, base: &Pubkey, lower_bin_id: i32, width: i
         &LB_CLMM_ID,
     )
     .0
+}
+
+/// The PDA of a basket position over `[lower, upper]`: created one bin
+/// array wide (or narrower) and extended, so the seed width is capped.
+pub fn basket_position_pda(lb_pair: &Pubkey, base: &Pubkey, lower_bin_id: i32, upper_bin_id: i32) -> Pubkey {
+    let width = (upper_bin_id - lower_bin_id + 1).min(DEFAULT_BIN_PER_POSITION);
+    position_pda(lb_pair, base, lower_bin_id, width)
 }
 
 /// Bin array index that holds `bin_id` (floor division).

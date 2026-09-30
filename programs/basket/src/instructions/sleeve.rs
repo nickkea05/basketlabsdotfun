@@ -339,9 +339,14 @@ impl<'a, 'info> PoolView<'a, 'info> {
         let data = ai.try_borrow_data()?;
         let h = dlmm::position_header(&data).ok_or_else(|| error!(BasketError::PositionMismatch))?;
         require!(h.lb_pair == self.lb_pair && h.owner == *basket_key, BasketError::PositionMismatch);
-        require!(h.lower_bin_id == r.lower_bin_id && h.upper_bin_id == r.upper_bin_id, BasketError::PositionMismatch);
+        // A backstop still being funded is narrower than its planned range
+        // (it grows one bin array per `fund_backstop`).
+        require!(
+            h.lower_bin_id == r.lower_bin_id && h.upper_bin_id <= r.upper_bin_id && h.upper_bin_id >= h.lower_bin_id,
+            BasketError::PositionMismatch
+        );
         let mut out = PositionAmounts { key: r.key, lower_bin_id: r.lower_bin_id, upper_bin_id: r.upper_bin_id, amount_x: 0, amount_y: 0 };
-        let width = r.width();
+        let width = h.upper_bin_id - h.lower_bin_id + 1;
         let mut offset = 0i32;
         while offset < width {
             let bin_id = r.lower_bin_id + offset;
@@ -626,10 +631,15 @@ impl<'a, 'info> DlmmAccounts<'a, 'info> {
         lower_bin_id: i32,
         width: i32,
     ) -> Result<u64> {
-        let expected = dlmm::position_pda(&self.lb_pair.key(), base.key, lower_bin_id, width);
+        // A position is created at most one bin array wide (the PDA is
+        // seeded with that width) and grown later with `extend_position`,
+        // one array per transaction: the runtime caps account growth at
+        // 10 KB per transaction and a bin costs 112 bytes.
+        require!(width >= 1 && width <= dlmm::DEFAULT_BIN_PER_POSITION, BasketError::InvalidArgument);
+        let init_width = width;
+        let expected = dlmm::position_pda(&self.lb_pair.key(), base.key, lower_bin_id, init_width);
         require_keys_eq!(position.key(), expected, BasketError::PositionMismatch);
         require!(position.data_is_empty(), BasketError::PositionMismatch);
-        let init_width = width.min(dlmm::DEFAULT_BIN_PER_POSITION);
         let basket_seeds = signer.basket_seeds();
         let auth_seeds = signer.share_auth_seeds();
         let signers: &[&[&[u8]]] = if base_is_share_auth { &[&basket_seeds, &auth_seeds] } else { &[&basket_seeds] };
@@ -653,27 +663,45 @@ impl<'a, 'info> DlmmAccounts<'a, 'info> {
             lower_bin_id,
             init_width,
         )?;
-        let target_upper = lower_bin_id + width - 1;
-        let mut upper = lower_bin_id + init_width - 1;
-        while upper < target_upper {
-            upper = (upper + dlmm::MAX_RESIZE_LENGTH).min(target_upper);
-            lb_clmm::cpi::increase_position_length2(
-                CpiContext::new_with_signer(
-                    self.program.key(),
-                    lb_clmm::cpi::accounts::IncreasePositionLength2 {
-                        funder: payer.clone(),
-                        lb_pair: self.lb_pair.clone(),
-                        position: position.clone(),
-                        owner: self.basket.clone(),
-                        system_program: self.system_program.clone(),
-                        event_authority: self.event_authority.clone(),
-                        program: self.program.clone(),
-                    },
-                    &[&basket_seeds],
-                ),
-                upper,
-            )?;
+        Ok(before.saturating_sub(payer.lamports()))
+    }
+
+    /// Grow `position` so it covers up to `minimum_upper_bin_id` (at most
+    /// `MAX_RESIZE_LENGTH` bins more than it has, one call per transaction).
+    /// Returns the rent the payer put in.
+    pub fn extend_position(
+        &self,
+        signer: &BasketSigner,
+        position: &AccountInfo<'info>,
+        payer: &AccountInfo<'info>,
+        minimum_upper_bin_id: i32,
+    ) -> Result<u64> {
+        let current_upper = {
+            let data = position.try_borrow_data()?;
+            dlmm::position_header(&data).ok_or_else(|| error!(BasketError::PositionMismatch))?.upper_bin_id
+        };
+        if minimum_upper_bin_id <= current_upper {
+            return Ok(0);
         }
+        require!(minimum_upper_bin_id - current_upper <= dlmm::MAX_RESIZE_LENGTH, BasketError::InvalidArgument);
+        let basket_seeds = signer.basket_seeds();
+        let before = payer.lamports();
+        lb_clmm::cpi::increase_position_length2(
+            CpiContext::new_with_signer(
+                self.program.key(),
+                lb_clmm::cpi::accounts::IncreasePositionLength2 {
+                    funder: payer.clone(),
+                    lb_pair: self.lb_pair.clone(),
+                    position: position.clone(),
+                    owner: self.basket.clone(),
+                    system_program: self.system_program.clone(),
+                    event_authority: self.event_authority.clone(),
+                    program: self.program.clone(),
+                },
+                &[&basket_seeds],
+            ),
+            minimum_upper_bin_id,
+        )?;
         Ok(before.saturating_sub(payer.lamports()))
     }
 

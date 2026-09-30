@@ -222,6 +222,8 @@ pub struct BackstopFunded {
     pub array_index: i64,
     pub amount_x: u64,
     pub amount_y: u64,
+    /// Rent the keeper paid to grow the position over this array (refunded at close).
+    pub position_rent_lamports: u64,
     pub complete: bool,
 }
 

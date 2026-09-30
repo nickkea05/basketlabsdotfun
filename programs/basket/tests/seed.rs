@@ -1,8 +1,8 @@
 //! `seed`: the first buy. Deposits components, mints X to the buyer (less the
-//! mint fee, taken as shares into the FeeVault), mints Y = X·r/(1−r) treasury
+//! mint fee, taken as shares into the FeeVault), mints Y = XÂ·r/(1âˆ’r) treasury
 //! shares, places the tight DLMM position around the launch bin with 80 % of
-//! both legs and leaves 20 % idle for the keeper's backstop (D4, D5, D8, §4,
-//! §5, change order §2, Q15).
+//! both legs and leaves 20 % idle for the keeper's backstop (D4, D5, D8, Â§4,
+//! Â§5, change order Â§2, Q15).
 
 mod common;
 
@@ -43,11 +43,11 @@ fn seeds_places_tight_and_mints_shares() {
     assert_eq!(env.mint_supply(&l.share_mint), x + y, "supply = X + treasury shares");
     assert_eq!(env.holder_shares(&l), x);
 
-    // Tight: [launch − w, launch + w], owned by the basket, 80 % of both legs.
+    // Tight: [launch âˆ’ w, launch + w], owned by the basket, 80 % of both legs.
     let b: Basket = env.load(&l.basket);
     let w = b.pool.preset.tight_half_width_bins as i32;
     assert_eq!((s.tight_lower, s.tight_upper), (LAUNCH_ACTIVE_ID - w, LAUNCH_ACTIVE_ID + w));
-    assert_eq!(s.tight, dlmm::position_pda(&l.pool.lb_pair, &l.basket, s.tight_lower, s.tight_upper - s.tight_lower + 1));
+    assert_eq!(s.tight, dlmm::basket_position_pda(&l.pool.lb_pair, &l.basket, s.tight_lower, s.tight_upper));
     let p = load_position(&env, &s.tight);
     assert_eq!(p.owner, l.basket);
     assert_eq!((p.lower_bin_id, p.upper_bin_id), (s.tight_lower, s.tight_upper));
@@ -206,7 +206,7 @@ fn gate_and_pause_apply_to_seed() {
 }
 
 /// 23 fixed accounts + 4 per component + the tight range's bin arrays
-/// against the 64-account lock limit: N ≤ 9 in one transaction (larger
+/// against the 64-account lock limit: N â‰¤ 9 in one transaction (larger
 /// books need the split flow; see README).
 #[test]
 fn seed_account_counts_and_cu_by_size() {

@@ -108,9 +108,14 @@ pub fn plan_sleeve(basket: &Basket, view: &PoolView, slice_bps: u16, x: u64, y: 
     let active = view.active_id;
     let mut plan = SleevePlan { backstop: (0, 0, 0, 0), tight: (x, y) };
     if basket.backstop_live() && basket.backstop.contains(active) && view.backstop.is_some() {
-        let lower = (active - dlmm::DEFAULT_BIN_PER_POSITION / 2).max(basket.backstop.lower_bin_id);
-        let upper = (lower + dlmm::DEFAULT_BIN_PER_POSITION - 1).min(basket.backstop.upper_bin_id);
-        let (x_bins, y_bins) = side_bins(lower, upper, active);
+        // Stay inside the bin arrays the tight add already carries: the
+        // widest basket has no account locks left for extra arrays.
+        let (t_lo, t_hi) = dlmm::bin_array_range(basket.tight.lower_bin_id, basket.tight.upper_bin_id);
+        let floor = dlmm::array_lower_bin(t_lo).max(basket.backstop.lower_bin_id);
+        let ceiling = dlmm::array_upper_bin(t_hi).min(basket.backstop.upper_bin_id);
+        let lower = (active - dlmm::DEFAULT_BIN_PER_POSITION / 2).max(floor);
+        let upper = (lower + dlmm::DEFAULT_BIN_PER_POSITION - 1).min(ceiling);
+        let (x_bins, y_bins) = if lower <= upper { side_bins(lower, upper, active) } else { (0, 0) };
         let bx = if x_bins > 0 { math::bps(x, slice_bps)? } else { 0 };
         let by = if y_bins > 0 { math::bps(y, slice_bps)? } else { 0 };
         plan.backstop = (bx, by, lower, upper);

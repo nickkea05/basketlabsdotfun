@@ -27,12 +27,19 @@ impl Env {
             lower = lower.min(b.backstop.lower_bin_id);
             upper = upper.max(b.backstop.upper_bin_id);
         }
+        // Plus a few arrays either side for outside liquidity (`external_*`).
+        lower -= 3 * dlmm::MAX_BIN_PER_ARRAY;
+        upper += 3 * dlmm::MAX_BIN_PER_ARRAY;
         let mut ix = self.swap_ix(&l.pool, &trader.pubkey(), x_to_y, amount_in, 0, lower, upper);
-        // Only arrays that exist can be passed; a Spot add never touches
-        // arrays outside the positions' ranges.
+        // Only arrays that exist can be passed.
         let fixed = ix.accounts.len() - l.pool.bin_array_metas(lower, upper).len();
         ix.accounts.truncate(fixed);
-        ix.accounts.extend(self.existing_bin_array_metas(&l.pool, lower, upper));
+        // DLMM walks the arrays in the order given: descending for a sell.
+        let mut arrays = self.existing_bin_array_metas(&l.pool, lower, upper);
+        if x_to_y {
+            arrays.reverse();
+        }
+        ix.accounts.extend(arrays);
         let out_mint = if x_to_y { WSOL } else { l.share_mint };
         let create = anchor_spl::associated_token::spl_associated_token_account::instruction::create_associated_token_account_idempotent(
             &trader.pubkey(),
@@ -62,6 +69,78 @@ impl Env {
         let trader = self.fund(lamports + 5 * LAMPORTS);
         let got = self.buy_shares(l, &trader, lamports);
         (trader, got)
+    }
+
+    // ---- outside liquidity: other LPs in the basket's pool ----
+
+    /// An outside LP (the admin) places `lamports` of wSOL bids flat over
+    /// `[lower, upper]`, which must lie below the active bin.
+    pub fn external_bids(&mut self, l: &Launched, lower: i32, upper: i32, lamports: u64) -> Pubkey {
+        let admin = self.admin.insecure_clone();
+        let active = l.pool.active_id(self);
+        assert!(upper < active, "bids must sit below the active bin");
+        self.wrap_sol(&admin, lamports);
+        self.create_ata(&admin.pubkey(), &l.share_mint);
+        self.ensure_bin_arrays(&l.pool, &admin, lower, upper);
+        let (position, _) = self.init_position_pda(&l.pool, &admin, &admin, lower, upper - lower + 1);
+        self.add_liquidity_chunked(&l.pool, &position, &admin, 0, lamports, active, lower, upper);
+        position
+    }
+
+    /// `holder` places `shares` as asks flat over `[lower, upper]`, which
+    /// must lie above the active bin (the admin funds the bin arrays).
+    pub fn external_asks(&mut self, l: &Launched, holder: &Keypair, lower: i32, upper: i32, shares: u64) -> Pubkey {
+        let admin = self.admin.insecure_clone();
+        let active = l.pool.active_id(self);
+        assert!(lower > active, "asks must sit above the active bin");
+        self.create_ata(&holder.pubkey(), &WSOL);
+        self.ensure_bin_arrays(&l.pool, &admin, lower, upper);
+        let (position, _) = self.init_position_pda(&l.pool, &admin, holder, lower, upper - lower + 1);
+        self.add_liquidity_chunked(&l.pool, &position, holder, shares, 0, active, lower, upper);
+        position
+    }
+
+    /// Drive the active bin down to `target` or below: outside bids are
+    /// placed from `target - 5` up to just under the basket's lowest bin,
+    /// then `seller` sells shares in chunks until the pool gets there.
+    pub fn push_price_below(&mut self, l: &Launched, seller: &Keypair, target: i32) {
+        let b: Basket = self.load(&l.basket);
+        let mut floor = b.tight.lower_bin_id;
+        if b.backstop.is_set() {
+            floor = floor.min(b.backstop.lower_bin_id);
+        }
+        assert!(target < floor, "target {target} is not below the basket's range (floor {floor})");
+        // Thin outside bids (2M lamports a bin) so a modest seller gets through.
+        let bins = (floor - 1 - (target - 5) + 1) as u64;
+        self.external_bids(l, target - 5, floor - 1, bins * 2_000_000);
+        let seller_ata = Env::ata(&seller.pubkey(), &l.share_mint);
+        while l.pool.active_id(self) > target {
+            let have = self.token_amount(&seller_ata);
+            assert!(have > 0, "seller ran out of shares at bin {}", l.pool.active_id(self));
+            self.sell_shares(l, seller, have.min(5_000_000));
+        }
+    }
+
+    /// Drive the active bin up to `target` or above: `holder`'s shares are
+    /// placed as asks from just over the basket's highest bin to `target + 5`,
+    /// then a fresh buyer buys through them.
+    pub fn push_price_above(&mut self, l: &Launched, holder: &Keypair, target: i32) {
+        let b: Basket = self.load(&l.basket);
+        let mut ceiling = b.tight.upper_bin_id;
+        if b.backstop.is_set() {
+            ceiling = ceiling.max(b.backstop.upper_bin_id);
+        }
+        assert!(target > ceiling, "target {target} is not above the basket's range (ceiling {ceiling})");
+        let have = self.token_amount(&Env::ata(&holder.pubkey(), &l.share_mint));
+        // Thin outside asks (2M base units a bin) so a modest buyer gets through.
+        let bins = (target + 5 - (ceiling + 1) + 1) as u64;
+        let shares = have.min(bins * 2_000_000);
+        assert!(shares > 0, "holder has no shares to place as asks");
+        self.external_asks(l, holder, ceiling + 1, target + 5, shares);
+        let buyer = self.fund(100 * LAMPORTS);
+        while l.pool.active_id(self) < target {
+            self.buy_shares(l, &buyer, 5_000_000);
+        }
     }
 
     pub fn claim_pool_fees_ix(&self, l: &Launched, caller: &Pubkey, position: &Pubkey, min_bin_id: i32, max_bin_id: i32) -> Instruction {

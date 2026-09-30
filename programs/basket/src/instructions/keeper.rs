@@ -241,9 +241,10 @@ pub fn handle_place_backstop<'info>(ctx: Context<'info, KeeperPool<'info>>) -> R
     let (lo_idx, hi_idx) = dlmm::backstop_arrays(center, preset.backstop_half_width_bins as i32, preset.backstop_max_arrays.min(MAX_BACKSTOP_ARRAYS));
     let lower = dlmm::array_lower_bin(lo_idx);
     let upper = dlmm::array_upper_bin(hi_idx);
-    let width = upper - lower + 1;
-    require!(width <= dlmm::POSITION_MAX_LENGTH, BasketError::InvalidArgument);
+    require!(upper - lower + 1 <= dlmm::POSITION_MAX_LENGTH, BasketError::InvalidArgument);
 
+    // The position is created over the first bin array only; each
+    // `fund_backstop` grows it by one array (10 KB realloc cap per tx).
     let (array_rent, _) = c.dl.ensure_bin_arrays(ctx.remaining_accounts, &c.keeper, lo_idx, hi_idx)?;
     let position_rent = c.dl.init_position(
         &c.signer,
@@ -253,7 +254,7 @@ pub fn handle_place_backstop<'info>(ctx: Context<'info, KeeperPool<'info>>) -> R
         &c.keeper,
         &a.rent.to_account_info(),
         lower,
-        width,
+        dlmm::MAX_BIN_PER_ARRAY,
     )?;
 
     let keeper = c.keeper.clone();
@@ -292,12 +293,16 @@ pub fn handle_fund_backstop<'info>(ctx: Context<'info, KeeperPool<'info>>, array
     let (lo_idx, hi_idx) = dlmm::bin_array_range(basket.backstop.lower_bin_id, basket.backstop.upper_bin_id);
     require!(array_index >= lo_idx && array_index <= hi_idx, BasketError::BinArrayMismatch);
     let bit = 1u8 << (array_index - lo_idx);
-    require!(basket.backstop_mask & bit == 0, BasketError::BackstopState);
+    // Arrays are funded in ascending order: the position grows one array at
+    // a time and can only grow upwards.
+    require!(basket.backstop_mask == bit - 1, BasketError::BackstopState);
 
     let (active_id, _) = {
         let data = c.dl.lb_pair.try_borrow_data()?;
         dlmm::lb_pair_active_id(&data).ok_or_else(|| error!(BasketError::PoolMismatch))?
     };
+    let array_upper = dlmm::array_upper_bin(array_index).min(basket.backstop.upper_bin_id);
+    let extend_rent = c.dl.extend_position(&c.signer, &a.backstop_position.to_account_info(), &c.keeper, array_upper)?;
     let idle_x = idle_amount(c.dl.basket_share_ata)?;
     let idle_y = idle_amount(c.dl.basket_wsol_ata)?;
 
@@ -337,7 +342,7 @@ pub fn handle_fund_backstop<'info>(ctx: Context<'info, KeeperPool<'info>>, array
     if complete {
         basket.backstop_state = BACKSTOP_LIVE;
     }
-    emit!(BackstopFunded { basket: basket.key(), array_index, amount_x, amount_y, complete });
+    emit!(BackstopFunded { basket: basket.key(), array_index, amount_x, amount_y, position_rent_lamports: extend_rent, complete });
     Ok(())
 }
 
@@ -361,6 +366,8 @@ pub fn handle_withdraw_backstop<'info>(mut ctx: Context<'info, KeeperPool<'info>
     require_keys_eq!(a.backstop_position.key(), basket.backstop.key, BasketError::PositionMismatch);
     let (lo_idx, hi_idx) = dlmm::bin_array_range(basket.backstop.lower_bin_id, basket.backstop.upper_bin_id);
     require!(array_index >= lo_idx && array_index <= hi_idx, BasketError::BinArrayMismatch);
+    // Only arrays that were funded hold anything (and are covered by the position).
+    require!(basket.backstop_mask & (1u8 << (array_index - lo_idx)) != 0, BasketError::BackstopState);
     let (active_id, _) = {
         let data = c.dl.lb_pair.try_borrow_data()?;
         dlmm::lb_pair_active_id(&data).ok_or_else(|| error!(BasketError::PoolMismatch))?
@@ -406,7 +413,10 @@ pub fn handle_close_backstop<'info>(ctx: Context<'info, KeeperPool<'info>>) -> R
     require_keys_eq!(a.backstop_position.key(), basket.backstop.key, BasketError::PositionMismatch);
     {
         let data = a.backstop_position.try_borrow_data()?;
-        let width = basket.backstop.width() as usize;
+        // The position may be narrower than the planned range if the
+        // withdrawal started before funding finished.
+        let header = dlmm::position_header(&data).ok_or_else(|| error!(BasketError::PositionMismatch))?;
+        let width = (header.upper_bin_id - header.lower_bin_id + 1) as usize;
         for offset in 0..width {
             require!(dlmm::position_bin_share(&data, offset).unwrap_or(1) == 0, BasketError::BackstopState);
         }

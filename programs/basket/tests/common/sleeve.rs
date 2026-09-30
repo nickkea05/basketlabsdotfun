@@ -27,8 +27,8 @@ pub struct SeedPlan {
 
 impl SeedPlan {
     /// 1_000 units (6 dp) of every component, 1_000 shares, and the SOL leg
-    /// the launch bin implies: Y = X·r/(1−r) treasury shares at 1 lamport
-    /// per base unit → 0.333 SOL. At r = 25 % that implies 1.33 SOL of
+    /// the launch bin implies: Y = XÂ·r/(1âˆ’r) treasury shares at 1 lamport
+    /// per base unit â†’ 0.333 SOL. At r = 25 % that implies 1.33 SOL of
     /// value, above the 1 SOL minimum.
     pub fn default_for(l: &Launched) -> Self {
         let initial_shares = 1_000_000_000;
@@ -95,7 +95,7 @@ impl Env {
         self.fund_components_for(&payer, l, &plan.deposits);
     }
 
-    /// The tight range `seed` will open: `[active − w, active + w]`.
+    /// The tight range `seed` will open: `[active âˆ’ w, active + w]`.
     pub fn tight_range_at(&self, l: &Launched, active_id: i32) -> (i32, i32) {
         let b: Basket = self.load(&l.basket);
         let w = b.pool.preset.tight_half_width_bins as i32;
@@ -143,7 +143,7 @@ impl Env {
         let fee_vault = fee_vault_pda(&l.share_mint);
         let active = l.pool.active_id(self);
         let (lower, upper) = self.tight_range_at(l, active);
-        let tight = dlmm::position_pda(&l.pool.lb_pair, &l.basket, lower, upper - lower + 1);
+        let tight = dlmm::basket_position_pda(&l.pool.lb_pair, &l.basket, lower, upper);
         let mut accounts = basket::accounts::Seed {
             payer,
             config: config_pda(),
@@ -322,7 +322,7 @@ impl Env {
         self.tight_amounts(l).amount_y + self.backstop_amounts(l).amount_y
     }
 
-    /// Holder shares outstanding: supply − shares in positions − idle shares
+    /// Holder shares outstanding: supply âˆ’ shares in positions âˆ’ idle shares
     /// (+ shares mid-redemption). The denominator of every pro-rata rule.
     pub fn holder_shares(&self, l: &Launched) -> u64 {
         let b: Basket = self.load(&l.basket);
@@ -332,7 +332,7 @@ impl Env {
     /// Off-chain mirror of `mint`: creation-unit shares, step-rule `r`,
     /// treasury shares and the SOL the pool will take at the active bin.
     pub fn mint_quote(&self, l: &Launched, deposits: &[u64]) -> MintQuote {
-        // Priced off `vault − owed`: amounts owed to frozen claimants do not back holder shares.
+        // Priced off `vault âˆ’ owed`: amounts owed to frozen claimants do not back holder shares.
         let vaults: Vec<u64> = l
             .mints
             .iter()
