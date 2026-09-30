@@ -1,12 +1,18 @@
 //! `redeem`, `redeem_begin` / `redeem_components`, `claim_frozen` (D9, D10,
-//! §4, §5).
+//! §4, §5; change order Q14).
 //!
 //! A redemption of `shares` (gross) withholds the redeem fee as shares into
 //! the FeeVault, burns the net amount, and pays `net / H` of everything the
 //! holders own: each component vault (less amounts already owed to frozen
-//! claimants) and the basket's pool position (SOL to the holder, the
-//! withdrawn treasury shares burned). `H` is the holder-share count before
-//! the burn. Redeem has no gate and ignores the pause flag.
+//! claimants), the SOL in the **tight** position plus the idle sleeve, and
+//! burns the treasury shares that come out with it. `H` is the holder-share
+//! count before the burn. The backstop is not touched (Q14: it is a
+//! protocol-level guarantee, counted in NAV and settled at close). Redeem
+//! has no gate and ignores the pause flag.
+//!
+//! The tight leg is `remove_liquidity_by_range2(bps)` with
+//! `bps = ⌊net·10⁴/H⌋`; the rounding shortfall against the exact pro-rata is
+//! made up from idle SOL when there is any.
 //!
 //! If a component's vault or the holder's ATA is frozen (D10) the leg is
 //! recorded in a `FrozenClaim` and `Position.owed` instead of reverting; the
@@ -17,7 +23,8 @@
 //! every component is paid.
 //!
 //! Remaining accounts: `[position, vault, holder_ata, mint]` per component
-//! in book order, then any FrozenClaim PDAs.
+//! in book order, then the pool's bin arrays (tight range; backstop bins
+//! with liquidity) and any FrozenClaim PDAs, in any order.
 
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
@@ -27,7 +34,7 @@ use anchor_spl::token_2022::Token2022;
 use anchor_spl::token_interface;
 
 use crate::constants::*;
-use crate::damm::{self, cp_amm};
+use crate::dlmm;
 use crate::error::BasketError;
 use crate::events::*;
 use crate::instructions::positions::{load_components, read_token_amount, ComponentAccounts};
@@ -48,10 +55,8 @@ pub struct Redeem<'info> {
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
-        has_one = pool @ BasketError::PoolMismatch,
-        has_one = pool_position @ BasketError::PoolMismatch,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     #[account(mut)]
     pub share_mint: Account<'info, Mint>,
     /// CHECK: holder's share ATA (any share token account the holder owns works).
@@ -74,26 +79,29 @@ pub struct Redeem<'info> {
     /// CHECK: ATA(holder, wSOL): receives the SOL leg, closed if created here.
     #[account(mut)]
     pub holder_wsol_ata: UncheckedAccount<'info>,
-    /// CHECK: cp-amm position NFT account owned by the basket.
-    #[account(address = damm::position_nft_account(&basket.position_nft_mint))]
-    pub position_nft_account: UncheckedAccount<'info>,
-    /// CHECK: cp-amm pool authority.
-    #[account(address = damm::pool_authority())]
-    pub pool_authority: UncheckedAccount<'info>,
+
+    /// CHECK: the basket's DLMM pool.
     #[account(mut)]
-    pub pool: AccountLoader<'info, cp_amm::accounts::Pool>,
+    pub lb_pair: UncheckedAccount<'info>,
+    /// CHECK: pool reserve for shares.
     #[account(mut)]
-    pub pool_position: AccountLoader<'info, cp_amm::accounts::Position>,
-    /// CHECK: cp-amm vault for the share mint.
-    #[account(mut, address = damm::token_vault(&share_mint.key(), &pool.key()))]
-    pub token_a_vault: UncheckedAccount<'info>,
-    /// CHECK: cp-amm vault for wSOL.
-    #[account(mut, address = damm::token_vault(&wsol_mint.key(), &pool.key()))]
-    pub token_b_vault: UncheckedAccount<'info>,
-    pub cp_amm_program: Program<'info, cp_amm::program::CpAmm>,
-    /// CHECK: cp-amm event authority PDA.
-    #[account(address = damm::event_authority())]
-    pub event_authority: UncheckedAccount<'info>,
+    pub reserve_x: UncheckedAccount<'info>,
+    /// CHECK: pool reserve for wSOL.
+    #[account(mut)]
+    pub reserve_y: UncheckedAccount<'info>,
+    /// CHECK: the tight position.
+    #[account(mut)]
+    pub tight_position: UncheckedAccount<'info>,
+    /// CHECK: the backstop position (any account when the basket has none).
+    pub backstop_position: UncheckedAccount<'info>,
+    /// CHECK: lb_clmm event authority.
+    pub dlmm_event_authority: UncheckedAccount<'info>,
+    /// CHECK: the DLMM program.
+    #[account(address = dlmm::LB_CLMM_ID)]
+    pub dlmm_program: UncheckedAccount<'info>,
+    /// CHECK: SPL Memo.
+    #[account(address = dlmm::MEMO_PROGRAM_ID)]
+    pub memo_program: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub token_2022_program: Program<'info, Token2022>,
@@ -110,10 +118,8 @@ pub struct RedeemBegin<'info> {
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
-        has_one = pool @ BasketError::PoolMismatch,
-        has_one = pool_position @ BasketError::PoolMismatch,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     #[account(mut)]
     pub share_mint: Account<'info, Mint>,
     /// CHECK: holder's share token account.
@@ -145,26 +151,29 @@ pub struct RedeemBegin<'info> {
     /// CHECK: ATA(holder, wSOL).
     #[account(mut)]
     pub holder_wsol_ata: UncheckedAccount<'info>,
-    /// CHECK: cp-amm position NFT account owned by the basket.
-    #[account(address = damm::position_nft_account(&basket.position_nft_mint))]
-    pub position_nft_account: UncheckedAccount<'info>,
-    /// CHECK: cp-amm pool authority.
-    #[account(address = damm::pool_authority())]
-    pub pool_authority: UncheckedAccount<'info>,
+
+    /// CHECK: the basket's DLMM pool.
     #[account(mut)]
-    pub pool: AccountLoader<'info, cp_amm::accounts::Pool>,
+    pub lb_pair: UncheckedAccount<'info>,
+    /// CHECK: pool reserve for shares.
     #[account(mut)]
-    pub pool_position: AccountLoader<'info, cp_amm::accounts::Position>,
-    /// CHECK: cp-amm vault for the share mint.
-    #[account(mut, address = damm::token_vault(&share_mint.key(), &pool.key()))]
-    pub token_a_vault: UncheckedAccount<'info>,
-    /// CHECK: cp-amm vault for wSOL.
-    #[account(mut, address = damm::token_vault(&wsol_mint.key(), &pool.key()))]
-    pub token_b_vault: UncheckedAccount<'info>,
-    pub cp_amm_program: Program<'info, cp_amm::program::CpAmm>,
-    /// CHECK: cp-amm event authority PDA.
-    #[account(address = damm::event_authority())]
-    pub event_authority: UncheckedAccount<'info>,
+    pub reserve_x: UncheckedAccount<'info>,
+    /// CHECK: pool reserve for wSOL.
+    #[account(mut)]
+    pub reserve_y: UncheckedAccount<'info>,
+    /// CHECK: the tight position.
+    #[account(mut)]
+    pub tight_position: UncheckedAccount<'info>,
+    /// CHECK: the backstop position (any account when the basket has none).
+    pub backstop_position: UncheckedAccount<'info>,
+    /// CHECK: lb_clmm event authority.
+    pub dlmm_event_authority: UncheckedAccount<'info>,
+    /// CHECK: the DLMM program.
+    #[account(address = dlmm::LB_CLMM_ID)]
+    pub dlmm_program: UncheckedAccount<'info>,
+    /// CHECK: SPL Memo.
+    #[account(address = dlmm::MEMO_PROGRAM_ID)]
+    pub memo_program: UncheckedAccount<'info>,
 
     pub token_program: Program<'info, Token>,
     pub token_2022_program: Program<'info, Token2022>,
@@ -181,10 +190,8 @@ pub struct RedeemComponents<'info> {
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
-        has_one = pool @ BasketError::PoolMismatch,
-        has_one = pool_position @ BasketError::PoolMismatch,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     pub share_mint: Account<'info, Mint>,
     #[account(
         mut,
@@ -193,8 +200,14 @@ pub struct RedeemComponents<'info> {
         has_one = holder,
     )]
     pub redemption: Account<'info, Redemption>,
-    pub pool: AccountLoader<'info, cp_amm::accounts::Pool>,
-    pub pool_position: AccountLoader<'info, cp_amm::accounts::Position>,
+    /// CHECK: ATA(basket, share_mint) — idle shares for the denominator.
+    pub basket_share_ata: UncheckedAccount<'info>,
+    /// CHECK: the basket's DLMM pool.
+    pub lb_pair: UncheckedAccount<'info>,
+    /// CHECK: the tight position.
+    pub tight_position: UncheckedAccount<'info>,
+    /// CHECK: the backstop position (any account when the basket has none).
+    pub backstop_position: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
     pub token_2022_program: Program<'info, Token2022>,
     pub associated_token_program: Program<'info, AssociatedToken>,
@@ -206,7 +219,7 @@ pub struct ClaimFrozen<'info> {
     #[account(mut)]
     pub wallet: Signer<'info>,
     #[account(seeds = [seeds::BASKET, share_mint.key().as_ref()], bump = basket.bump, has_one = share_mint)]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     pub share_mint: Account<'info, Mint>,
     #[account(
         mut,
@@ -240,19 +253,36 @@ pub struct ClaimFrozen<'info> {
 }
 
 // ---------------------------------------------------------------------------
-// Shared pieces
+// Shared pieces (also used by `sweep_fees`, where the FeeVault is the holder)
 // ---------------------------------------------------------------------------
 
-struct Programs<'a, 'info> {
-    token: &'a AccountInfo<'info>,
-    token_2022: &'a AccountInfo<'info>,
-    ata: &'a AccountInfo<'info>,
-    system: &'a AccountInfo<'info>,
+pub struct Programs<'a, 'info> {
+    pub token: &'a AccountInfo<'info>,
+    pub token_2022: &'a AccountInfo<'info>,
+    pub ata: &'a AccountInfo<'info>,
+    pub system: &'a AccountInfo<'info>,
+}
+
+/// Whose shares are being redeemed: a wallet signing the transaction, or a
+/// program PDA (the FeeVault) signing through `seeds`.
+pub struct Redeemer<'a, 'info> {
+    pub ai: &'a AccountInfo<'info>,
+    pub seeds: Option<[&'a [u8]; 3]>,
+    /// Pays rent for ATAs / claims created along the way.
+    pub payer: &'a AccountInfo<'info>,
+    /// Frozen legs: record a `FrozenClaim` (wallets) or forfeit (FeeVault).
+    pub record_frozen: bool,
+}
+
+impl<'a, 'info> Redeemer<'a, 'info> {
+    fn signer_seeds(&self) -> Vec<&'a [u8]> {
+        self.seeds.map(|s| s.to_vec()).unwrap_or_default()
+    }
 }
 
 /// Fee to the FeeVault (as shares), net burned. Returns `(net, fee)`.
-fn take_shares<'info>(
-    holder: &AccountInfo<'info>,
+pub fn take_shares<'info>(
+    redeemer: &Redeemer<'_, 'info>,
     holder_share_ata: &AccountInfo<'info>,
     fee_vault_share_ata: &AccountInfo<'info>,
     share_mint: &AccountInfo<'info>,
@@ -264,88 +294,85 @@ fn take_shares<'info>(
     let fee = math::bps(gross, fee_bps)?;
     let net = gross - fee;
     require!(net > 0, BasketError::ZeroAmount);
+    let seeds = redeemer.signer_seeds();
+    let seed_set = [seeds.as_slice()];
+    let signers: &[&[&[u8]]] = if seeds.is_empty() { &[] } else { &seed_set };
     if fee > 0 {
         token::transfer(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 token_program.key(),
-                token::Transfer { from: holder_share_ata.clone(), to: fee_vault_share_ata.clone(), authority: holder.clone() },
+                token::Transfer { from: holder_share_ata.clone(), to: fee_vault_share_ata.clone(), authority: redeemer.ai.clone() },
+                signers,
             ),
             fee,
         )?;
     }
     token::burn(
-        CpiContext::new(
+        CpiContext::new_with_signer(
             token_program.key(),
-            token::Burn { mint: share_mint.clone(), from: holder_share_ata.clone(), authority: holder.clone() },
+            token::Burn { mint: share_mint.clone(), from: holder_share_ata.clone(), authority: redeemer.ai.clone() },
+            signers,
         ),
         net,
     )?;
     Ok((net, fee))
 }
 
-struct SleeveOut {
-    treasury_shares_burned: u64,
-    lamports_out: u64,
+pub struct SleeveOut {
+    pub treasury_shares_burned: u64,
+    pub lamports_out: u64,
 }
 
-/// Remove `net / h` of the basket's position: SOL straight to the holder's
-/// wSOL account (unwrapped if we created it), shares to the basket and burned.
+/// Remove `net / h` of the tight position (`bps` granularity, shortfall
+/// covered from idle SOL) plus `net / h` of the idle sleeve: SOL to
+/// `dest_wsol_ata`, treasury shares burned.
 #[allow(clippy::too_many_arguments)]
-fn remove_sleeve<'info>(
-    liquidity: u128,
+pub fn remove_sleeve<'info>(
+    view: &PoolView<'_, 'info>,
     net: u64,
     h: u64,
     signer: &BasketSigner,
-    basket: &AccountInfo<'info>,
-    holder: &AccountInfo<'info>,
-    share_mint: &AccountInfo<'info>,
-    wsol_mint: &AccountInfo<'info>,
-    basket_share_ata: &AccountInfo<'info>,
-    holder_wsol_ata: &AccountInfo<'info>,
-    cpi: cp_amm::cpi::accounts::RemoveLiquidity<'info>,
-    cp_amm_program: &AccountInfo<'info>,
-    programs: &Programs<'_, 'info>,
+    dl: &DlmmAccounts<'_, 'info>,
+    tight_position: &AccountInfo<'info>,
+    dest_wsol_ata: &AccountInfo<'info>,
 ) -> Result<SleeveOut> {
-    let delta = math::liquidity_share(liquidity, net, h)?;
-    if delta == 0 {
-        return Ok(SleeveOut { treasury_shares_burned: 0, lamports_out: 0 });
-    }
-    ensure_ata(holder, basket_share_ata, basket, share_mint, programs.system, programs.token, programs.ata)?;
-    let created_wsol = holder_wsol_ata.data_is_empty();
-    ensure_ata(holder, holder_wsol_ata, holder, wsol_mint, programs.system, programs.token, programs.ata)?;
-    let wsol_before = read_token_amount(holder_wsol_ata)?;
+    require!(h > 0, BasketError::ZeroAmount);
+    let idle_x = idle_amount(dl.basket_share_ata)?;
+    let idle_y = idle_amount(dl.basket_wsol_ata)?;
+    let tight = view.tight.unwrap_or_default();
 
-    let basket_seeds = signer.basket_seeds();
-    cp_amm::cpi::remove_liquidity(
-        CpiContext::new_with_signer(cp_amm_program.key(), cpi, &[&basket_seeds]),
-        cp_amm::types::RemoveLiquidityParameters {
-            liquidity_delta: delta,
-            token_a_amount_threshold: 0,
-            token_b_amount_threshold: 0,
-        },
-    )?;
-
-    let treasury_shares_burned =
-        burn_basket_share_dust(basket, basket_share_ata, share_mint, programs.token, signer)?;
-    let lamports_out = read_token_amount(holder_wsol_ata)? - wsol_before;
-    if created_wsol {
-        token::close_account(CpiContext::new(
-            programs.token.key(),
-            token::CloseAccount { account: holder_wsol_ata.clone(), destination: holder.clone(), authority: holder.clone() },
-        ))?;
+    let bps = math::mul_div_u64(net, BPS_TOTAL as u64, h, Rounding::Down)?.min(BPS_TOTAL as u64) as u16;
+    let mut x_out = 0u64;
+    let mut y_out = 0u64;
+    if bps > 0 && (tight.amount_x > 0 || tight.amount_y > 0) {
+        let arrays = view.bin_arrays_for(tight.lower_bin_id, tight.upper_bin_id)?;
+        dl.remove_liquidity(signer, tight_position, arrays, tight.lower_bin_id, tight.upper_bin_id, bps)?;
+        x_out = read_token_amount(dl.basket_share_ata)?.saturating_sub(idle_x);
+        y_out = read_token_amount(dl.basket_wsol_ata)?.saturating_sub(idle_y);
     }
+    // Exact pro-rata of tight SOL + idle SOL; whatever the bps removal fell
+    // short by comes from idle, as far as idle goes.
+    let pool_sol = tight.amount_y.checked_add(idle_y).ok_or_else(|| error!(BasketError::MathOverflow))?;
+    let expected = math::component_for_shares(net, pool_sol, h, Rounding::Down)?;
+    let from_idle = expected.saturating_sub(y_out).min(idle_y);
+    let lamports_out = y_out + from_idle;
+    let idle_x_share = math::component_for_shares(net, idle_x, h, Rounding::Down)?;
+    let treasury_shares_burned = x_out + idle_x_share;
+
+    transfer_from_basket(dl.basket, dl.basket_wsol_ata, dest_wsol_ata, dl.token_program, signer, lamports_out)?;
+    burn_basket_shares(dl.basket, dl.basket_share_ata, dl.share_mint, dl.token_program, signer, treasury_shares_burned)?;
     Ok(SleeveOut { treasury_shares_burned, lamports_out })
 }
 
-struct PaidLegs {
-    paid: u16,
-    claims: u16,
+pub struct PaidLegs {
+    pub paid: u16,
+    pub claims: u16,
 }
 
-/// Pay `net / h` of each component to the holder, or into a FrozenClaim
+/// Pay `net / h` of each component to the redeemer, or into a FrozenClaim
 /// when the leg is frozen. `claims` are the trailing remaining accounts.
 #[allow(clippy::too_many_arguments)]
-fn pay_components<'info>(
+pub fn pay_components<'info>(
     components: &[ComponentAccounts<'info>],
     claims: &[AccountInfo<'info>],
     net: u64,
@@ -353,12 +380,13 @@ fn pay_components<'info>(
     signer: &BasketSigner,
     basket: &AccountInfo<'info>,
     basket_key: &Pubkey,
-    holder: &AccountInfo<'info>,
+    redeemer: &Redeemer<'_, 'info>,
     programs: &Programs<'_, 'info>,
     now: i64,
 ) -> Result<PaidLegs> {
     let mut out = PaidLegs { paid: 0, claims: 0 };
     let basket_seeds = signer.basket_seeds();
+    let holder = redeemer.ai;
     for c in components {
         let amount = math::component_for_shares(net, c.available, h, Rounding::Down)?;
         out.paid += 1;
@@ -367,6 +395,9 @@ fn pay_components<'info>(
         }
         let tp = if c.position.token_program == token::ID { programs.token } else { programs.token_2022 };
         if c.vault_frozen || c.user_frozen {
+            if !redeemer.record_frozen {
+                continue;
+            }
             let (claim_key, bump) = frozen_claim_address(&signer.share_mint, holder.key, &c.position.mint);
             let claim = claims
                 .iter()
@@ -381,7 +412,7 @@ fn pay_components<'info>(
             emit!(FrozenClaimCreated { basket: *basket_key, wallet: holder.key(), mint: c.position.mint, amount });
             continue;
         }
-        ensure_ata(holder, c.user_ata, holder, c.mint, programs.system, tp, programs.ata)?;
+        ensure_ata(redeemer.payer, c.user_ata, holder, c.mint, programs.system, tp, programs.ata)?;
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
                 tp.key(),
@@ -445,6 +476,32 @@ fn record_claim<'info>(
     Ok(())
 }
 
+/// Send the SOL leg to the holder: through their wSOL ATA, unwrapped when
+/// this instruction created it.
+#[allow(clippy::too_many_arguments)]
+fn holder_sol_leg<'info>(
+    view: &PoolView<'_, 'info>,
+    net: u64,
+    h: u64,
+    signer: &BasketSigner,
+    dl: &DlmmAccounts<'_, 'info>,
+    tight_position: &AccountInfo<'info>,
+    holder: &AccountInfo<'info>,
+    holder_wsol_ata: &AccountInfo<'info>,
+    programs: &Programs<'_, 'info>,
+) -> Result<SleeveOut> {
+    let created = holder_wsol_ata.data_is_empty();
+    ensure_ata(holder, holder_wsol_ata, holder, dl.wsol_mint, programs.system, programs.token, programs.ata)?;
+    let out = remove_sleeve(view, net, h, signer, dl, tight_position, holder_wsol_ata)?;
+    if created {
+        token::close_account(CpiContext::new(
+            programs.token.key(),
+            token::CloseAccount { account: holder_wsol_ata.clone(), destination: holder.clone(), authority: holder.clone() },
+        ))?;
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -457,15 +514,19 @@ pub fn handle_redeem<'info>(ctx: Context<'info, Redeem<'info>>, shares: u64) -> 
 
     let n = ctx.accounts.basket.position_count as usize;
     let components = load_components(&basket_key, ctx.remaining_accounts, n)?;
-    let claims = ComponentAccounts::trailing(ctx.remaining_accounts, n);
+    let tail = ComponentAccounts::trailing(ctx.remaining_accounts, n);
 
-    let (h, liquidity) = {
-        let pool = ctx.accounts.pool.load()?;
-        let position = ctx.accounts.pool_position.load()?;
-        require_keys_eq!(position.pool, ctx.accounts.pool.key(), BasketError::PoolMismatch);
-        let h = holder_shares(ctx.accounts.share_mint.supply, &pool, &position, ctx.accounts.basket.pending_redeem_shares)?;
-        (h, position.unlocked_liquidity)
-    };
+    let basket = &ctx.accounts.basket;
+    let view = PoolView::load(
+        basket,
+        &basket_key,
+        &ctx.accounts.lb_pair.to_account_info(),
+        Some(&ctx.accounts.tight_position.to_account_info()),
+        Some(&ctx.accounts.backstop_position.to_account_info()),
+        tail,
+    )?;
+    let idle_shares = idle_amount(&ctx.accounts.basket_share_ata.to_account_info())?;
+    let h = view.holder_shares(ctx.accounts.share_mint.supply, idle_shares, basket.pending_redeem_shares)?;
 
     let holder = ctx.accounts.holder.to_account_info();
     let share_mint = ctx.accounts.share_mint.to_account_info();
@@ -475,53 +536,50 @@ pub fn handle_redeem<'info>(ctx: Context<'info, Redeem<'info>>, shares: u64) -> 
         ata: &ctx.accounts.associated_token_program.to_account_info(),
         system: &ctx.accounts.system_program.to_account_info(),
     };
+    let redeemer = Redeemer { ai: &holder, seeds: None, payer: &holder, record_frozen: true };
     let fee_vault_ai = ctx.accounts.fee_vault.to_account_info();
     ensure_ata(&holder, &ctx.accounts.fee_vault_share_ata, &fee_vault_ai, &share_mint, programs.system, programs.token, programs.ata)?;
     let (net, fee) = take_shares(
-        &holder,
+        &redeemer,
         &ctx.accounts.holder_share_ata,
         &ctx.accounts.fee_vault_share_ata,
         &share_mint,
         programs.token,
         shares,
-        ctx.accounts.basket.fees.redeem_fee_bps,
+        basket.fees.redeem_fee_bps,
     )?;
 
-    let signer = BasketSigner::new(&ctx.accounts.basket);
+    let signer = BasketSigner::new(basket);
     let basket_ai = ctx.accounts.basket.to_account_info();
-    let sleeve = remove_sleeve(
-        liquidity,
+    let dl = DlmmAccounts {
+        program: &ctx.accounts.dlmm_program.to_account_info(),
+        lb_pair: &ctx.accounts.lb_pair.to_account_info(),
+        reserve_x: &ctx.accounts.reserve_x.to_account_info(),
+        reserve_y: &ctx.accounts.reserve_y.to_account_info(),
+        share_mint: &share_mint,
+        wsol_mint: &ctx.accounts.wsol_mint.to_account_info(),
+        basket_share_ata: &ctx.accounts.basket_share_ata.to_account_info(),
+        basket_wsol_ata: &ctx.accounts.basket_wsol_ata.to_account_info(),
+        basket: &basket_ai,
+        token_program: programs.token,
+        memo_program: &ctx.accounts.memo_program.to_account_info(),
+        event_authority: &ctx.accounts.dlmm_event_authority.to_account_info(),
+        system_program: programs.system,
+    };
+    dl.check(basket)?;
+    let sleeve = holder_sol_leg(
+        &view,
         net,
         h,
         &signer,
-        &basket_ai,
+        &dl,
+        &ctx.accounts.tight_position.to_account_info(),
         &holder,
-        &share_mint,
-        &ctx.accounts.wsol_mint.to_account_info(),
-        &ctx.accounts.basket_share_ata,
-        &ctx.accounts.holder_wsol_ata,
-        cp_amm::cpi::accounts::RemoveLiquidity {
-            pool_authority: ctx.accounts.pool_authority.to_account_info(),
-            pool: ctx.accounts.pool.to_account_info(),
-            position: ctx.accounts.pool_position.to_account_info(),
-            token_a_account: ctx.accounts.basket_share_ata.to_account_info(),
-            token_b_account: ctx.accounts.holder_wsol_ata.to_account_info(),
-            token_a_vault: ctx.accounts.token_a_vault.to_account_info(),
-            token_b_vault: ctx.accounts.token_b_vault.to_account_info(),
-            token_a_mint: share_mint.clone(),
-            token_b_mint: ctx.accounts.wsol_mint.to_account_info(),
-            position_nft_account: ctx.accounts.position_nft_account.to_account_info(),
-            signer: basket_ai.clone(),
-            token_a_program: programs.token.clone(),
-            token_b_program: programs.token.clone(),
-            event_authority: ctx.accounts.event_authority.to_account_info(),
-            program: ctx.accounts.cp_amm_program.to_account_info(),
-        },
-        &ctx.accounts.cp_amm_program.to_account_info(),
+        &ctx.accounts.holder_wsol_ata.to_account_info(),
         &programs,
     )?;
 
-    let legs = pay_components(&components, claims, net, h, &signer, &basket_ai, &basket_key, &holder, &programs, now)?;
+    let legs = pay_components(&components, tail, net, h, &signer, &basket_ai, &basket_key, &redeemer, &programs, now)?;
 
     ctx.accounts.basket.touch(now);
     emit!(Redeemed {
@@ -544,13 +602,17 @@ pub fn handle_redeem_begin<'info>(ctx: Context<'info, RedeemBegin<'info>>, share
     let basket_key = ctx.accounts.basket.key();
     require!(ctx.accounts.basket.seeded, BasketError::NotSeeded);
 
-    let (h, liquidity) = {
-        let pool = ctx.accounts.pool.load()?;
-        let position = ctx.accounts.pool_position.load()?;
-        require_keys_eq!(position.pool, ctx.accounts.pool.key(), BasketError::PoolMismatch);
-        let h = holder_shares(ctx.accounts.share_mint.supply, &pool, &position, ctx.accounts.basket.pending_redeem_shares)?;
-        (h, position.unlocked_liquidity)
-    };
+    let basket = &ctx.accounts.basket;
+    let view = PoolView::load(
+        basket,
+        &basket_key,
+        &ctx.accounts.lb_pair.to_account_info(),
+        Some(&ctx.accounts.tight_position.to_account_info()),
+        Some(&ctx.accounts.backstop_position.to_account_info()),
+        ctx.remaining_accounts,
+    )?;
+    let idle_shares = idle_amount(&ctx.accounts.basket_share_ata.to_account_info())?;
+    let h = view.holder_shares(ctx.accounts.share_mint.supply, idle_shares, basket.pending_redeem_shares)?;
 
     let holder = ctx.accounts.holder.to_account_info();
     let share_mint = ctx.accounts.share_mint.to_account_info();
@@ -560,49 +622,46 @@ pub fn handle_redeem_begin<'info>(ctx: Context<'info, RedeemBegin<'info>>, share
         ata: &ctx.accounts.associated_token_program.to_account_info(),
         system: &ctx.accounts.system_program.to_account_info(),
     };
+    let redeemer = Redeemer { ai: &holder, seeds: None, payer: &holder, record_frozen: true };
     let fee_vault_ai = ctx.accounts.fee_vault.to_account_info();
     ensure_ata(&holder, &ctx.accounts.fee_vault_share_ata, &fee_vault_ai, &share_mint, programs.system, programs.token, programs.ata)?;
     let (net, fee) = take_shares(
-        &holder,
+        &redeemer,
         &ctx.accounts.holder_share_ata,
         &ctx.accounts.fee_vault_share_ata,
         &share_mint,
         programs.token,
         shares,
-        ctx.accounts.basket.fees.redeem_fee_bps,
+        basket.fees.redeem_fee_bps,
     )?;
 
-    let signer = BasketSigner::new(&ctx.accounts.basket);
+    let signer = BasketSigner::new(basket);
     let basket_ai = ctx.accounts.basket.to_account_info();
-    let sleeve = remove_sleeve(
-        liquidity,
+    let dl = DlmmAccounts {
+        program: &ctx.accounts.dlmm_program.to_account_info(),
+        lb_pair: &ctx.accounts.lb_pair.to_account_info(),
+        reserve_x: &ctx.accounts.reserve_x.to_account_info(),
+        reserve_y: &ctx.accounts.reserve_y.to_account_info(),
+        share_mint: &share_mint,
+        wsol_mint: &ctx.accounts.wsol_mint.to_account_info(),
+        basket_share_ata: &ctx.accounts.basket_share_ata.to_account_info(),
+        basket_wsol_ata: &ctx.accounts.basket_wsol_ata.to_account_info(),
+        basket: &basket_ai,
+        token_program: programs.token,
+        memo_program: &ctx.accounts.memo_program.to_account_info(),
+        event_authority: &ctx.accounts.dlmm_event_authority.to_account_info(),
+        system_program: programs.system,
+    };
+    dl.check(basket)?;
+    let sleeve = holder_sol_leg(
+        &view,
         net,
         h,
         &signer,
-        &basket_ai,
+        &dl,
+        &ctx.accounts.tight_position.to_account_info(),
         &holder,
-        &share_mint,
-        &ctx.accounts.wsol_mint.to_account_info(),
-        &ctx.accounts.basket_share_ata,
-        &ctx.accounts.holder_wsol_ata,
-        cp_amm::cpi::accounts::RemoveLiquidity {
-            pool_authority: ctx.accounts.pool_authority.to_account_info(),
-            pool: ctx.accounts.pool.to_account_info(),
-            position: ctx.accounts.pool_position.to_account_info(),
-            token_a_account: ctx.accounts.basket_share_ata.to_account_info(),
-            token_b_account: ctx.accounts.holder_wsol_ata.to_account_info(),
-            token_a_vault: ctx.accounts.token_a_vault.to_account_info(),
-            token_b_vault: ctx.accounts.token_b_vault.to_account_info(),
-            token_a_mint: share_mint.clone(),
-            token_b_mint: ctx.accounts.wsol_mint.to_account_info(),
-            position_nft_account: ctx.accounts.position_nft_account.to_account_info(),
-            signer: basket_ai.clone(),
-            token_a_program: programs.token.clone(),
-            token_b_program: programs.token.clone(),
-            event_authority: ctx.accounts.event_authority.to_account_info(),
-            program: ctx.accounts.cp_amm_program.to_account_info(),
-        },
-        &ctx.accounts.cp_amm_program.to_account_info(),
+        &ctx.accounts.holder_wsol_ata.to_account_info(),
         &programs,
     )?;
 
@@ -640,7 +699,7 @@ pub fn handle_redeem_components<'info>(ctx: Context<'info, RedeemComponents<'inf
     let basket_key = ctx.accounts.basket.key();
     let n = count as usize;
     let components = load_components(&basket_key, ctx.remaining_accounts, n)?;
-    let claims = ComponentAccounts::trailing(ctx.remaining_accounts, n);
+    let tail = ComponentAccounts::trailing(ctx.remaining_accounts, n);
 
     // Not yet paid in this redemption.
     for c in &components {
@@ -652,11 +711,17 @@ pub fn handle_redeem_components<'info>(ctx: Context<'info, RedeemComponents<'inf
 
     // Same denominator as at `redeem_begin`: the burned shares are still
     // counted through `pending_redeem_shares`.
-    let h = {
-        let pool = ctx.accounts.pool.load()?;
-        let position = ctx.accounts.pool_position.load()?;
-        holder_shares(ctx.accounts.share_mint.supply, &pool, &position, ctx.accounts.basket.pending_redeem_shares)?
-    };
+    let basket = &ctx.accounts.basket;
+    let view = PoolView::load(
+        basket,
+        &basket_key,
+        &ctx.accounts.lb_pair.to_account_info(),
+        Some(&ctx.accounts.tight_position.to_account_info()),
+        Some(&ctx.accounts.backstop_position.to_account_info()),
+        tail,
+    )?;
+    let idle_shares = idle_amount(&ctx.accounts.basket_share_ata.to_account_info())?;
+    let h = view.holder_shares(ctx.accounts.share_mint.supply, idle_shares, basket.pending_redeem_shares)?;
     let net = ctx.accounts.redemption.shares;
 
     let holder = ctx.accounts.holder.to_account_info();
@@ -666,9 +731,10 @@ pub fn handle_redeem_components<'info>(ctx: Context<'info, RedeemComponents<'inf
         ata: &ctx.accounts.associated_token_program.to_account_info(),
         system: &ctx.accounts.system_program.to_account_info(),
     };
-    let signer = BasketSigner::new(&ctx.accounts.basket);
+    let redeemer = Redeemer { ai: &holder, seeds: None, payer: &holder, record_frozen: true };
+    let signer = BasketSigner::new(basket);
     let basket_ai = ctx.accounts.basket.to_account_info();
-    let legs = pay_components(&components, claims, net, h, &signer, &basket_ai, &basket_key, &holder, &programs, now)?;
+    let legs = pay_components(&components, tail, net, h, &signer, &basket_ai, &basket_key, &redeemer, &programs, now)?;
 
     let red = &mut ctx.accounts.redemption;
     for c in &components {

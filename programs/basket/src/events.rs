@@ -41,11 +41,16 @@ pub struct BasketCreated {
     pub payer: Pubkey,
     pub basket_type: u8,
     pub profile: u8,
+    pub creator_tier: u8,
     pub asset_count: u16,
     pub book_hash: [u8; 32],
     pub nonce: u64,
+    pub lb_pair: Pubkey,
+    pub bin_step: u16,
+    pub launch_active_id: i32,
+    pub deposit_lamports: u64,
+    pub pool_rent_lamports: u64,
 }
-
 #[event]
 pub struct PositionsAdded {
     pub basket: Pubkey,
@@ -58,14 +63,15 @@ pub struct PositionsAdded {
 pub struct Seeded {
     pub basket: Pubkey,
     pub buyer: Pubkey,
-    pub pool: Pubkey,
-    pub position_nft_mint: Pubkey,
+    pub tight_position: Pubkey,
+    pub tight_lower_bin_id: i32,
+    pub tight_upper_bin_id: i32,
     pub shares_to_buyer: u64,
     pub fee_shares: u64,
     pub treasury_shares: u64,
     pub sleeve_lamports: u64,
     pub creation_fee_lamports: u64,
-    pub sqrt_price: u128,
+    pub bin_array_rent_lamports: u64,
 }
 
 #[event]
@@ -76,9 +82,10 @@ pub struct Minted {
     pub fee_shares: u64,
     pub treasury_shares: u64,
     pub sleeve_lamports: u64,
+    pub backstop_lamports: u64,
     pub r_bps: u16,
+    pub active_id: i32,
 }
-
 #[event]
 pub struct Redeemed {
     pub basket: Pubkey,
@@ -164,7 +171,13 @@ pub struct Crystallized {
 #[event]
 pub struct PoolFeesClaimed {
     pub basket: Pubkey,
+    pub position: Pubkey,
     pub lamports: u64,
+    pub creator_lamports: u64,
+    pub buyback_lamports: u64,
+    pub team_lamports: u64,
+    pub prize_lamports: u64,
+    pub epoch: u64,
 }
 
 #[event]
@@ -172,12 +185,106 @@ pub struct FeesSwept {
     pub basket: Pubkey,
     pub creator_shares: u64,
     pub creator_lamports: u64,
-    pub protocol_shares: u64,
-    pub protocol_lamports: u64,
-    pub holder_shares: u64,
-    pub holder_lamports: u64,
+    /// The 80 % redeemed in kind into the FeeVault's component ATAs.
+    pub settled_shares: u64,
+    pub pool_lamports: u64,
+    pub buyback_lamports: u64,
+    pub team_lamports: u64,
+    pub prize_lamports: u64,
+    pub components_paid: u16,
+    pub complete: bool,
 }
 
+#[event]
+pub struct FeesSettled {
+    pub basket: Pubkey,
+    pub mint: Pubkey,
+    pub amount_in: u64,
+    pub lamports_out: u64,
+    pub buyback_lamports: u64,
+    pub team_lamports: u64,
+    pub prize_lamports: u64,
+}
+
+#[event]
+pub struct BackstopPlaced {
+    pub basket: Pubkey,
+    pub position: Pubkey,
+    pub lower_bin_id: i32,
+    pub upper_bin_id: i32,
+    pub bin_array_rent_lamports: u64,
+    pub position_rent_lamports: u64,
+}
+
+#[event]
+pub struct BackstopFunded {
+    pub basket: Pubkey,
+    pub array_index: i64,
+    pub amount_x: u64,
+    pub amount_y: u64,
+    pub complete: bool,
+}
+
+#[event]
+pub struct BackstopWithdrawn {
+    pub basket: Pubkey,
+    pub array_index: i64,
+    pub amount_x: u64,
+    pub amount_y: u64,
+    pub fee_lamports: u64,
+    pub complete: bool,
+}
+
+#[event]
+pub struct BackstopClosed {
+    pub basket: Pubkey,
+    pub position: Pubkey,
+}
+
+#[event]
+pub struct TightRecentered {
+    pub basket: Pubkey,
+    pub keeper: Pubkey,
+    pub active_id: i32,
+    pub old_position: Pubkey,
+    pub old_lower_bin_id: i32,
+    pub old_upper_bin_id: i32,
+    pub new_position: Pubkey,
+    pub new_lower_bin_id: i32,
+    pub new_upper_bin_id: i32,
+    pub amount_x: u64,
+    pub amount_y: u64,
+    pub topped_up_shares: u64,
+    pub fee_lamports: u64,
+    pub bin_array_rent_lamports: u64,
+}
+
+#[event]
+pub struct DepositSpent {
+    pub basket: Pubkey,
+    pub lamports: u64,
+    pub reason: u8,
+    pub spent_total: u64,
+}
+
+#[event]
+pub struct BuybackExecuted {
+    pub lamports_in: u64,
+    pub bskt_burned: u64,
+}
+
+#[event]
+pub struct BsktMintSet {
+    pub mint: Pubkey,
+}
+
+#[event]
+pub struct PrizesPaid {
+    pub epoch: u64,
+    pub total_lamports: u64,
+    pub recipients: Vec<Pubkey>,
+    pub amounts: Vec<u64>,
+}
 #[event]
 pub struct CreatorSharesLocked {
     pub basket: Pubkey,
@@ -199,4 +306,6 @@ pub struct BasketClosed {
     pub share_mint: Pubkey,
     pub refunded_to: Pubkey,
     pub lamports: u64,
+    pub deposit_refunded: u64,
+    pub deposit_spent: u64,
 }

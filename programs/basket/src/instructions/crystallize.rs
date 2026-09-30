@@ -14,7 +14,6 @@ use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token::{Mint, Token};
 
 use crate::constants::*;
-use crate::damm::cp_amm;
 use crate::error::BasketError;
 use crate::events::*;
 use crate::instructions::sleeve::*;
@@ -27,17 +26,15 @@ pub struct Crystallize<'info> {
     #[account(mut)]
     pub keeper: Signer<'info>,
     #[account(seeds = [seeds::CONFIG], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(
         mut,
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
         has_one = creator @ BasketError::Unauthorized,
-        has_one = pool @ BasketError::PoolMismatch,
-        has_one = pool_position @ BasketError::PoolMismatch,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     #[account(mut)]
     pub share_mint: Account<'info, Mint>,
     /// CHECK: mint authority PDA, seeds checked.
@@ -48,8 +45,14 @@ pub struct Crystallize<'info> {
     /// CHECK: ATA(creator, share_mint), created if missing (keeper pays).
     #[account(mut)]
     pub creator_share_ata: UncheckedAccount<'info>,
-    pub pool: AccountLoader<'info, cp_amm::accounts::Pool>,
-    pub pool_position: AccountLoader<'info, cp_amm::accounts::Position>,
+    /// CHECK: ATA(basket, share_mint) — idle shares for the denominator.
+    pub basket_share_ata: UncheckedAccount<'info>,
+    /// CHECK: the basket's DLMM pool.
+    pub lb_pair: UncheckedAccount<'info>,
+    /// CHECK: the tight position.
+    pub tight_position: UncheckedAccount<'info>,
+    /// CHECK: the backstop position (any account when the basket has none).
+    pub backstop_position: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
@@ -77,7 +80,8 @@ pub fn accrue_mgmt_fee<'info>(
     Ok(shares)
 }
 
-pub fn handle_crystallize(ctx: Context<Crystallize>, nav_lamports_per_share: u64) -> Result<()> {
+/// Remaining accounts: the pool's bin arrays.
+pub fn handle_crystallize<'info>(ctx: Context<'info, Crystallize<'info>>, nav_lamports_per_share: u64) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(ctx.accounts.config.is_keeper(ctx.accounts.keeper.key), BasketError::Unauthorized);
     require!(nav_lamports_per_share > 0, BasketError::ZeroAmount);
@@ -92,9 +96,16 @@ pub fn handle_crystallize(ctx: Context<Crystallize>, nav_lamports_per_share: u64
     }
 
     let h = {
-        let pool = ctx.accounts.pool.load()?;
-        let position = ctx.accounts.pool_position.load()?;
-        holder_shares(ctx.accounts.share_mint.supply, &pool, &position, ctx.accounts.basket.pending_redeem_shares)?
+        let view = PoolView::load(
+            &ctx.accounts.basket,
+            &ctx.accounts.basket.key(),
+            &ctx.accounts.lb_pair.to_account_info(),
+            Some(&ctx.accounts.tight_position.to_account_info()),
+            Some(&ctx.accounts.backstop_position.to_account_info()),
+            ctx.remaining_accounts,
+        )?;
+        let idle = idle_amount(&ctx.accounts.basket_share_ata.to_account_info())?;
+        view.holder_shares(ctx.accounts.share_mint.supply, idle, ctx.accounts.basket.pending_redeem_shares)?
     };
 
     let keeper = ctx.accounts.keeper.to_account_info();

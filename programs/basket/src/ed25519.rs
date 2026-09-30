@@ -1,15 +1,13 @@
-//! D19: creator signature over `CreateBasketArgs`, verified by the ed25519
-//! precompile and checked here by instruction introspection.
+//! Ed25519 attestation check by instruction introspection (D10 in the
+//! change order: a keeper-signed creator tier passed to `create_basket`).
 //!
 //! The transaction carries an `Ed25519Program` instruction immediately before
-//! `create_basket`. The precompile has already verified the signature by the
-//! time we run; what we check is *what* it verified: one signature, by the
-//! creator, over exactly the payload bytes this instruction received.
+//! the instruction that consumes it. The precompile has already verified the
+//! signature by the time we run; what we check is *what* it verified: one
+//! signature, by the expected signer, over exactly the expected bytes.
 //!
 //! The message may be embedded in the precompile instruction or referenced
-//! from `create_basket`'s own data (offset 8, after the discriminator), which
-//! keeps large payloads out of the transaction twice.
-
+//! from another instruction's data.
 use anchor_lang::prelude::*;
 use solana_instructions_sysvar::{load_current_index_checked, load_instruction_at_checked};
 use solana_sdk_ids::ed25519_program;
@@ -24,7 +22,7 @@ const PUBKEY_LEN: usize = 32;
 /// Verify that the instruction right before the current one is an ed25519
 /// precompile call with a single signature by `expected_signer` over
 /// `expected_message`.
-pub fn verify_creator_signature(
+pub fn verify_ed25519_signature(
     instructions_sysvar: &AccountInfo,
     expected_signer: &Pubkey,
     expected_message: &[u8],
@@ -101,6 +99,36 @@ pub fn ed25519_instruction_referencing(
     data.extend_from_slice(&message_ix.to_le_bytes());
     data.extend_from_slice(pubkey);
     data.extend_from_slice(signature);
+    anchor_lang::solana_program::instruction::Instruction {
+        program_id: ed25519_program::ID,
+        accounts: vec![],
+        data,
+    }
+}
+
+/// Build the precompile instruction with signature, pubkey and message all
+/// embedded (small messages such as the tier attestation).
+pub fn ed25519_instruction_embedded(
+    pubkey: &[u8; 32],
+    signature: &[u8; 64],
+    message: &[u8],
+) -> anchor_lang::solana_program::instruction::Instruction {
+    let mut data = Vec::with_capacity(OFFSETS_START + OFFSETS_LEN + PUBKEY_LEN + SIGNATURE_LEN + message.len());
+    data.push(1);
+    data.push(0);
+    let pubkey_offset = (OFFSETS_START + OFFSETS_LEN) as u16;
+    let signature_offset = pubkey_offset + PUBKEY_LEN as u16;
+    let message_offset = signature_offset + SIGNATURE_LEN as u16;
+    data.extend_from_slice(&signature_offset.to_le_bytes());
+    data.extend_from_slice(&u16::MAX.to_le_bytes());
+    data.extend_from_slice(&pubkey_offset.to_le_bytes());
+    data.extend_from_slice(&u16::MAX.to_le_bytes());
+    data.extend_from_slice(&message_offset.to_le_bytes());
+    data.extend_from_slice(&(message.len() as u16).to_le_bytes());
+    data.extend_from_slice(&u16::MAX.to_le_bytes());
+    data.extend_from_slice(pubkey);
+    data.extend_from_slice(signature);
+    data.extend_from_slice(message);
     anchor_lang::solana_program::instruction::Instruction {
         program_id: ed25519_program::ID,
         accounts: vec![],

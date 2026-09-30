@@ -1,6 +1,15 @@
-//! Shared pieces of `seed` / `mint` / `redeem`: component transfers, share
-//! minting/burning under the basket's PDAs, wSOL wrapping and the DAMM v2
-//! fee configuration (D3, D5, D13, §3).
+//! Shared pieces of `seed` / `mint` / `redeem` / the keeper instructions:
+//! component transfers, share minting/burning under the basket's PDAs, wSOL
+//! wrapping, the DLMM pool view (both positions read from their bin arrays)
+//! and thin CPI wrappers around `lb_clmm` (D3, D5, change order §2).
+//!
+//! Sleeve model on DLMM: treasury shares (minted, backed by nothing) sit as
+//! asks above the active bin, sleeve SOL as bids below, in two basket-owned
+//! positions. `NAV = (components + SOL in positions + idle SOL) /
+//! (supply − shares in positions − idle shares)`; `holder_shares()` is that
+//! denominator. Anything left in the basket's own share / wSOL ATAs is
+//! "idle sleeve": the unplaced backstop slice right after `seed`, and
+//! deposit rounding afterwards.
 
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
@@ -9,9 +18,10 @@ use anchor_spl::token;
 use anchor_spl::token_interface;
 
 use crate::constants::*;
-use crate::damm::{self, cp_amm};
+use crate::dlmm::{self, lb_clmm};
 use crate::error::BasketError;
-use crate::instructions::positions::ComponentAccounts;
+use crate::events::DepositSpent;
+use crate::instructions::positions::{read_token_amount, ComponentAccounts};
 use crate::math::{self, Rounding};
 use crate::state::*;
 
@@ -23,11 +33,7 @@ pub struct BasketSigner {
 
 impl BasketSigner {
     pub fn new(basket: &Basket) -> Self {
-        BasketSigner {
-            share_mint: basket.share_mint,
-            bump: [basket.bump],
-            share_auth_bump: [basket.share_auth_bump],
-        }
+        BasketSigner { share_mint: basket.share_mint, bump: [basket.bump], share_auth_bump: [basket.share_auth_bump] }
     }
 
     pub fn basket_seeds(&self) -> [&[u8]; 3] {
@@ -49,11 +55,7 @@ pub fn ensure_ata<'info>(
     token_program: &AccountInfo<'info>,
     associated_token_program: &AccountInfo<'info>,
 ) -> Result<()> {
-    let expected = associated_token::get_associated_token_address_with_program_id(
-        authority.key,
-        mint.key,
-        token_program.key,
-    );
+    let expected = associated_token::get_associated_token_address_with_program_id(authority.key, mint.key, token_program.key);
     require_keys_eq!(ata.key(), expected, BasketError::ComponentMismatch);
     if !ata.data_is_empty() {
         return Ok(());
@@ -126,19 +128,18 @@ pub fn mint_shares<'info>(
     )
 }
 
-/// Burn whatever shares are left in the basket's own share ATA (treasury
-/// shares the pool did not pull because of rounding). Keeps
-/// `supply − pool_shares` an exact holder count.
-pub fn burn_basket_share_dust<'info>(
+/// Burn `amount` shares from the basket's own share ATA (treasury shares
+/// that came back out of a position, or their idle pro-rata).
+pub fn burn_basket_shares<'info>(
     basket: &AccountInfo<'info>,
     basket_share_ata: &AccountInfo<'info>,
     share_mint: &AccountInfo<'info>,
     token_program: &AccountInfo<'info>,
     signer: &BasketSigner,
-) -> Result<u64> {
-    let left = crate::instructions::positions::read_token_amount(basket_share_ata)?;
-    if left == 0 {
-        return Ok(0);
+    amount: u64,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
     }
     let seeds = signer.basket_seeds();
     token::burn(
@@ -147,15 +148,37 @@ pub fn burn_basket_share_dust<'info>(
             token::Burn { mint: share_mint.clone(), from: basket_share_ata.clone(), authority: basket.clone() },
             &[&seeds],
         ),
-        left,
-    )?;
-    Ok(left)
+        amount,
+    )
 }
 
-/// Move `lamports` from the buyer into the basket's wSOL ATA.
+/// Transfer `amount` from a basket-owned token account.
+pub fn transfer_from_basket<'info>(
+    basket: &AccountInfo<'info>,
+    from: &AccountInfo<'info>,
+    to: &AccountInfo<'info>,
+    token_program: &AccountInfo<'info>,
+    signer: &BasketSigner,
+    amount: u64,
+) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    let seeds = signer.basket_seeds();
+    token::transfer(
+        CpiContext::new_with_signer(
+            token_program.key(),
+            token::Transfer { from: from.clone(), to: to.clone(), authority: basket.clone() },
+            &[&seeds],
+        ),
+        amount,
+    )
+}
+
+/// Move `lamports` from a system-owned payer into a wSOL account.
 pub fn wrap_sol<'info>(
     payer: &AccountInfo<'info>,
-    basket_wsol_ata: &AccountInfo<'info>,
+    wsol_ata: &AccountInfo<'info>,
     system_program: &AccountInfo<'info>,
     token_program: &AccountInfo<'info>,
     lamports: u64,
@@ -164,16 +187,10 @@ pub fn wrap_sol<'info>(
         return Ok(());
     }
     system_program::transfer(
-        CpiContext::new(
-            system_program.key(),
-            system_program::Transfer { from: payer.clone(), to: basket_wsol_ata.clone() },
-        ),
+        CpiContext::new(system_program.key(), system_program::Transfer { from: payer.clone(), to: wsol_ata.clone() }),
         lamports,
     )?;
-    token::sync_native(CpiContext::new(
-        token_program.key(),
-        token::SyncNative { account: basket_wsol_ata.clone() },
-    ))
+    token::sync_native(CpiContext::new(token_program.key(), token::SyncNative { account: wsol_ata.clone() }))
 }
 
 /// Effective sleeve ratio: the step ratio until the pool's SOL side reaches
@@ -186,53 +203,537 @@ pub fn effective_r_bps(sleeve: &SleeveParams, pool_sol_lamports: u64) -> u16 {
     }
 }
 
-/// cp-amm fee config for a new pool: flat profile fee for `Open` baskets,
-/// the launch scheduler (cliff → profile fee, linear) otherwise (D13).
-pub fn pool_fee_parameters(config: &Config, basket: &Basket) -> Result<cp_amm::types::PoolFeeParameters> {
-    let end = damm::bps_to_fee_numerator(basket.fees.pool_fee_bps as u64);
-    let base_fee = if basket.uses_launch_scheduler() && config.scheduler.periods > 0 {
-        let cliff = damm::bps_to_fee_numerator(config.scheduler.cliff_bps as u64);
-        require!(cliff >= end, BasketError::FeeOutOfBounds);
-        let reduction = (cliff - end) / config.scheduler.periods as u64;
-        damm::time_scheduler_base_fee(cliff, config.scheduler.periods, config.scheduler.period_s, reduction)
-    } else {
-        damm::flat_base_fee(end)
-    };
-    Ok(cp_amm::types::PoolFeeParameters { base_fee, compounding_fee_bps: 0, padding: 0, dynamic_fee: None })
-}
-
 /// Split gross shares into (to buyer, fee) per the basket's mint fee (§4).
 pub fn split_mint_fee(gross: u64, fee_bps: u16) -> Result<(u64, u64)> {
     let fee = math::bps(gross, fee_bps)?;
     Ok((gross - fee, fee))
 }
 
-/// Shares the basket's pool position currently holds (rounded up, see
-/// `math::position_shares`).
-pub fn position_share_amount(pool: &cp_amm::accounts::Pool, position: &cp_amm::accounts::Position) -> Result<u64> {
-    let liquidity = position
-        .unlocked_liquidity
-        .checked_add(position.vested_liquidity)
-        .and_then(|l| l.checked_add(position.permanent_locked_liquidity))
-        .ok_or_else(|| error!(BasketError::MathOverflow))?;
-    math::position_shares(liquidity, pool.sqrt_min_price, pool.sqrt_price, pool.sqrt_max_price)
-}
-
-/// `supply − shares in our pool position + shares mid-redemption`: the
-/// denominator of every pro-rata rule (§2 NAV note).
-pub fn holder_shares(
-    supply: u64,
-    pool: &cp_amm::accounts::Pool,
-    position: &cp_amm::accounts::Position,
-    pending_redeem_shares: u64,
-) -> Result<u64> {
-    let in_pool = position_share_amount(pool, position)?;
-    supply
-        .checked_sub(in_pool)
-        .and_then(|h| h.checked_add(pending_redeem_shares))
-        .ok_or_else(|| error!(BasketError::MathOverflow))
-}
-
 pub fn round_up_bps(amount: u64, bps: u16) -> Result<u64> {
     math::mul_div_u64(amount, bps as u64, BPS_TOTAL as u64, Rounding::Up)
+}
+
+/// Move lamports between two accounts this program may debit. Must come
+/// after the instruction's last CPI (the runtime re-checks the caller's
+/// lamport balance at every CPI boundary).
+pub fn move_lamports<'info>(from: &AccountInfo<'info>, to: &AccountInfo<'info>, amount: u64) -> Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    **from.try_borrow_mut_lamports()? = from.lamports().checked_sub(amount).ok_or_else(|| error!(BasketError::MathOverflow))?;
+    **to.try_borrow_mut_lamports()? = to.lamports().checked_add(amount).ok_or_else(|| error!(BasketError::MathOverflow))?;
+    Ok(())
+}
+
+/// Reimburse `lamports` of non-refundable rent (pool, bin arrays) that
+/// `funder` just paid, out of the deployer's deposit held on the Basket
+/// account; whatever the deposit cannot cover stays with the funder. Call
+/// after the last CPI. Returns what was reimbursed.
+pub fn spend_deposit<'info>(
+    basket: &mut Account<'info, Basket>,
+    funder: &AccountInfo<'info>,
+    lamports: u64,
+    reason: u8,
+) -> Result<u64> {
+    if lamports == 0 {
+        return Ok(0);
+    }
+    let available = basket.deposit_lamports.saturating_sub(basket.deposit_spent_lamports);
+    let paid = lamports.min(available);
+    if paid > 0 {
+        let basket_ai = basket.to_account_info();
+        // Never dip into the account's own rent exemption.
+        let rent_min = Rent::get()?.minimum_balance(basket_ai.data_len());
+        require!(basket_ai.lamports().saturating_sub(paid) >= rent_min, BasketError::MathOverflow);
+        move_lamports(&basket_ai, funder, paid)?;
+        basket.deposit_spent_lamports += paid;
+    }
+    emit!(DepositSpent { basket: basket.key(), lamports: paid, reason, spent_total: basket.deposit_spent_lamports });
+    Ok(paid)
+}
+
+pub const SPEND_POOL: u8 = 0;
+pub const SPEND_BIN_ARRAY: u8 = 1;
+
+// ---------------------------------------------------------------------------
+// Pool view: both positions, read from the bin arrays passed in
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PositionAmounts {
+    pub key: Pubkey,
+    pub lower_bin_id: i32,
+    pub upper_bin_id: i32,
+    /// Treasury shares (X) the position holds, rounded up.
+    pub amount_x: u64,
+    /// SOL (Y) the position holds, rounded down.
+    pub amount_y: u64,
+}
+
+pub struct PoolView<'a, 'info> {
+    pub lb_pair: Pubkey,
+    pub active_id: i32,
+    pub bin_step: u16,
+    arrays: Vec<(i64, &'a AccountInfo<'info>)>,
+    pub tight: Option<PositionAmounts>,
+    pub backstop: Option<PositionAmounts>,
+}
+
+impl<'a, 'info> PoolView<'a, 'info> {
+    /// `lb_pair` is address-checked against the basket; `tight` / `backstop`
+    /// are required whenever the basket has them; `tail` is scanned for the
+    /// pool's bin arrays (any other accounts in it are ignored).
+    pub fn load(
+        basket: &Basket,
+        basket_key: &Pubkey,
+        lb_pair: &AccountInfo<'info>,
+        tight: Option<&AccountInfo<'info>>,
+        backstop: Option<&AccountInfo<'info>>,
+        tail: &'a [AccountInfo<'info>],
+    ) -> Result<Self> {
+        require_keys_eq!(lb_pair.key(), basket.pool.lb_pair, BasketError::PoolMismatch);
+        require_keys_eq!(*lb_pair.owner, dlmm::LB_CLMM_ID, BasketError::PoolMismatch);
+        let (active_id, bin_step) = {
+            let data = lb_pair.try_borrow_data()?;
+            dlmm::lb_pair_active_id(&data).ok_or_else(|| error!(BasketError::PoolMismatch))?
+        };
+        let mut arrays: Vec<(i64, &'a AccountInfo<'info>)> = Vec::with_capacity(tail.len());
+        for ai in tail {
+            if *ai.owner != dlmm::LB_CLMM_ID {
+                continue;
+            }
+            let data = ai.try_borrow_data()?;
+            if let Some(h) = dlmm::bin_array_header(&data) {
+                if h.lb_pair == basket.pool.lb_pair && arrays.iter().all(|(i, _)| *i != h.index) {
+                    arrays.push((h.index, ai));
+                }
+            }
+        }
+        let mut view = PoolView { lb_pair: basket.pool.lb_pair, active_id, bin_step, arrays, tight: None, backstop: None };
+        if basket.tight.is_set() {
+            let ai = tight.ok_or_else(|| error!(BasketError::PositionMismatch))?;
+            view.tight = Some(view.read_position(basket_key, &basket.tight, ai)?);
+        }
+        let backstop_has_liquidity = matches!(basket.backstop_state, BACKSTOP_FUNDING | BACKSTOP_LIVE | BACKSTOP_WITHDRAWING);
+        if backstop_has_liquidity && basket.backstop.is_set() {
+            let ai = backstop.ok_or_else(|| error!(BasketError::PositionMismatch))?;
+            view.backstop = Some(view.read_position(basket_key, &basket.backstop, ai)?);
+        }
+        Ok(view)
+    }
+
+    pub fn bin_array(&self, index: i64) -> Result<&'a AccountInfo<'info>> {
+        self.arrays.iter().find(|(i, _)| *i == index).map(|(_, ai)| *ai).ok_or_else(|| error!(BasketError::BinArrayMismatch))
+    }
+
+    /// Writable bin-array infos covering `[lower, upper]`, for a CPI's
+    /// remaining accounts.
+    pub fn bin_arrays_for(&self, lower: i32, upper: i32) -> Result<Vec<AccountInfo<'info>>> {
+        let (lo, hi) = dlmm::bin_array_range(lower, upper);
+        (lo..=hi).map(|i| self.bin_array(i).cloned()).collect()
+    }
+
+    fn read_position(&self, basket_key: &Pubkey, r: &PositionRef, ai: &AccountInfo<'info>) -> Result<PositionAmounts> {
+        require_keys_eq!(ai.key(), r.key, BasketError::PositionMismatch);
+        require_keys_eq!(*ai.owner, dlmm::LB_CLMM_ID, BasketError::PositionMismatch);
+        let data = ai.try_borrow_data()?;
+        let h = dlmm::position_header(&data).ok_or_else(|| error!(BasketError::PositionMismatch))?;
+        require!(h.lb_pair == self.lb_pair && h.owner == *basket_key, BasketError::PositionMismatch);
+        require!(h.lower_bin_id == r.lower_bin_id && h.upper_bin_id == r.upper_bin_id, BasketError::PositionMismatch);
+        let mut out = PositionAmounts { key: r.key, lower_bin_id: r.lower_bin_id, upper_bin_id: r.upper_bin_id, amount_x: 0, amount_y: 0 };
+        let width = r.width();
+        let mut offset = 0i32;
+        while offset < width {
+            let bin_id = r.lower_bin_id + offset;
+            let share = dlmm::position_bin_share(&data, offset as usize).ok_or_else(|| error!(BasketError::PositionMismatch))?;
+            if share == 0 {
+                offset += 1;
+                continue;
+            }
+            let idx = dlmm::bin_array_index(bin_id);
+            let arr = self.bin_array(idx)?;
+            let arr_data = arr.try_borrow_data()?;
+            let slot = (bin_id - dlmm::array_lower_bin(idx)) as usize;
+            let bin = dlmm::bin_at(&arr_data, slot).ok_or_else(|| error!(BasketError::BinArrayMismatch))?;
+            if bin.liquidity_supply > 0 {
+                let (x, y) = if share >= bin.liquidity_supply {
+                    (bin.amount_x, bin.amount_y)
+                } else {
+                    (
+                        math::to_u64(math::mul_div_u256(
+                            ruint::aliases::U256::from(bin.amount_x),
+                            ruint::aliases::U256::from(share),
+                            ruint::aliases::U256::from(bin.liquidity_supply),
+                            Rounding::Up,
+                        )?)?,
+                        math::to_u64(math::mul_div_u256(
+                            ruint::aliases::U256::from(bin.amount_y),
+                            ruint::aliases::U256::from(share),
+                            ruint::aliases::U256::from(bin.liquidity_supply),
+                            Rounding::Down,
+                        )?)?,
+                    )
+                };
+                out.amount_x = out.amount_x.checked_add(x).ok_or_else(|| error!(BasketError::MathOverflow))?;
+                out.amount_y = out.amount_y.checked_add(y).ok_or_else(|| error!(BasketError::MathOverflow))?;
+            }
+            offset += 1;
+        }
+        Ok(out)
+    }
+
+    /// Treasury shares sitting in positions.
+    pub fn shares_in_positions(&self) -> u64 {
+        self.tight.map(|p| p.amount_x).unwrap_or(0) + self.backstop.map(|p| p.amount_x).unwrap_or(0)
+    }
+
+    /// SOL sitting in positions.
+    pub fn sol_in_positions(&self) -> u64 {
+        self.tight.map(|p| p.amount_y).unwrap_or(0) + self.backstop.map(|p| p.amount_y).unwrap_or(0)
+    }
+
+    /// `supply − shares in positions − idle shares + shares mid-redemption`:
+    /// the denominator of every pro-rata rule (§2 NAV note).
+    pub fn holder_shares(&self, supply: u64, idle_shares: u64, pending_redeem_shares: u64) -> Result<u64> {
+        supply
+            .checked_sub(self.shares_in_positions())
+            .and_then(|h| h.checked_sub(idle_shares))
+            .and_then(|h| h.checked_add(pending_redeem_shares))
+            .ok_or_else(|| error!(BasketError::MathOverflow))
+    }
+
+    pub fn price_q64(&self, bin_id: i32) -> Result<u128> {
+        dlmm::bin_price_q64(bin_id, self.bin_step).ok_or_else(|| error!(BasketError::MathOverflow))
+    }
+}
+
+/// Idle sleeve in the basket's own ATAs (0 when an ATA does not exist yet).
+pub fn idle_amount(ata: &AccountInfo) -> Result<u64> {
+    if ata.data_is_empty() {
+        Ok(0)
+    } else {
+        read_token_amount(ata)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DLMM CPI wrappers
+// ---------------------------------------------------------------------------
+
+/// The accounts every liquidity CPI needs; `user_token_*` are the basket's
+/// own ATAs so deposits are pulled from, and withdrawals land in, the
+/// basket's idle sleeve.
+pub struct DlmmAccounts<'a, 'info> {
+    pub program: &'a AccountInfo<'info>,
+    pub lb_pair: &'a AccountInfo<'info>,
+    pub reserve_x: &'a AccountInfo<'info>,
+    pub reserve_y: &'a AccountInfo<'info>,
+    pub share_mint: &'a AccountInfo<'info>,
+    pub wsol_mint: &'a AccountInfo<'info>,
+    pub basket_share_ata: &'a AccountInfo<'info>,
+    pub basket_wsol_ata: &'a AccountInfo<'info>,
+    pub basket: &'a AccountInfo<'info>,
+    pub token_program: &'a AccountInfo<'info>,
+    pub memo_program: &'a AccountInfo<'info>,
+    pub event_authority: &'a AccountInfo<'info>,
+    pub system_program: &'a AccountInfo<'info>,
+}
+
+impl<'a, 'info> DlmmAccounts<'a, 'info> {
+    pub fn check(&self, basket: &Basket) -> Result<()> {
+        require_keys_eq!(self.program.key(), dlmm::LB_CLMM_ID, BasketError::PoolMismatch);
+        require_keys_eq!(self.lb_pair.key(), basket.pool.lb_pair, BasketError::PoolMismatch);
+        require_keys_eq!(self.reserve_x.key(), dlmm::reserve(&basket.pool.lb_pair, &basket.share_mint), BasketError::PoolMismatch);
+        require_keys_eq!(self.reserve_y.key(), dlmm::reserve(&basket.pool.lb_pair, &token::spl_token::native_mint::ID), BasketError::PoolMismatch);
+        require_keys_eq!(self.share_mint.key(), basket.share_mint, BasketError::PoolMismatch);
+        require_keys_eq!(self.wsol_mint.key(), token::spl_token::native_mint::ID, BasketError::PoolMismatch);
+        require_keys_eq!(self.memo_program.key(), dlmm::MEMO_PROGRAM_ID, BasketError::PoolMismatch);
+        require_keys_eq!(self.event_authority.key(), dlmm::event_authority(), BasketError::PoolMismatch);
+        Ok(())
+    }
+
+    /// `add_liquidity_by_strategy2`, Spot / imbalanced: X over bins ≥ active,
+    /// Y over bins ≤ active, within `[min_bin_id, max_bin_id]` (which must
+    /// lie inside the position). `bin_arrays` cover the range.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_liquidity(
+        &self,
+        signer: &BasketSigner,
+        position: &AccountInfo<'info>,
+        bin_arrays: Vec<AccountInfo<'info>>,
+        amount_x: u64,
+        amount_y: u64,
+        active_id: i32,
+        min_bin_id: i32,
+        max_bin_id: i32,
+    ) -> Result<()> {
+        if amount_x == 0 && amount_y == 0 {
+            return Ok(());
+        }
+        let seeds = signer.basket_seeds();
+        let signer_seeds: [&[&[u8]]; 1] = [&seeds];
+        let ctx = CpiContext::new_with_signer(
+            self.program.key(),
+            lb_clmm::cpi::accounts::AddLiquidityByStrategy2 {
+                position: position.clone(),
+                lb_pair: self.lb_pair.clone(),
+                bin_array_bitmap_extension: None,
+                user_token_x: self.basket_share_ata.clone(),
+                user_token_y: self.basket_wsol_ata.clone(),
+                reserve_x: self.reserve_x.clone(),
+                reserve_y: self.reserve_y.clone(),
+                token_x_mint: self.share_mint.clone(),
+                token_y_mint: self.wsol_mint.clone(),
+                sender: self.basket.clone(),
+                token_x_program: self.token_program.clone(),
+                token_y_program: self.token_program.clone(),
+                event_authority: self.event_authority.clone(),
+                program: self.program.clone(),
+            },
+            &signer_seeds,
+        )
+        .with_remaining_accounts(bin_arrays);
+        lb_clmm::cpi::add_liquidity_by_strategy2(
+            ctx,
+            lb_clmm::types::LiquidityParameterByStrategy {
+                amount_x,
+                amount_y,
+                active_id,
+                max_active_bin_slippage: 1,
+                strategy_parameters: lb_clmm::types::StrategyParameters {
+                    min_bin_id,
+                    max_bin_id,
+                    strategy_type: lb_clmm::types::StrategyType::SpotImBalanced,
+                    parameteres: [0u8; 64],
+                },
+            },
+            lb_clmm::types::RemainingAccountsInfo { slices: vec![] },
+        )
+    }
+
+    /// `remove_liquidity_by_range2(bps)` over `[from, to]` into the basket's ATAs.
+    pub fn remove_liquidity(
+        &self,
+        signer: &BasketSigner,
+        position: &AccountInfo<'info>,
+        bin_arrays: Vec<AccountInfo<'info>>,
+        from_bin_id: i32,
+        to_bin_id: i32,
+        bps_to_remove: u16,
+    ) -> Result<()> {
+        if bps_to_remove == 0 {
+            return Ok(());
+        }
+        let seeds = signer.basket_seeds();
+        let signer_seeds: [&[&[u8]]; 1] = [&seeds];
+        let ctx = CpiContext::new_with_signer(
+            self.program.key(),
+            lb_clmm::cpi::accounts::RemoveLiquidityByRange2 {
+                position: position.clone(),
+                lb_pair: self.lb_pair.clone(),
+                bin_array_bitmap_extension: None,
+                user_token_x: self.basket_share_ata.clone(),
+                user_token_y: self.basket_wsol_ata.clone(),
+                reserve_x: self.reserve_x.clone(),
+                reserve_y: self.reserve_y.clone(),
+                token_x_mint: self.share_mint.clone(),
+                token_y_mint: self.wsol_mint.clone(),
+                sender: self.basket.clone(),
+                token_x_program: self.token_program.clone(),
+                token_y_program: self.token_program.clone(),
+                memo_program: self.memo_program.clone(),
+                event_authority: self.event_authority.clone(),
+                program: self.program.clone(),
+            },
+            &signer_seeds,
+        )
+        .with_remaining_accounts(bin_arrays);
+        lb_clmm::cpi::remove_liquidity_by_range2(
+            ctx,
+            from_bin_id,
+            to_bin_id,
+            bps_to_remove,
+            lb_clmm::types::RemainingAccountsInfo { slices: vec![] },
+        )
+    }
+
+    /// `claim_fee2` over `[min, max]` into the basket's ATAs (SOL only under
+    /// `collect_fee_mode = OnlyY`). Returns the wSOL delta.
+    pub fn claim_fee(
+        &self,
+        signer: &BasketSigner,
+        position: &AccountInfo<'info>,
+        bin_arrays: Vec<AccountInfo<'info>>,
+        min_bin_id: i32,
+        max_bin_id: i32,
+    ) -> Result<u64> {
+        let before = read_token_amount(self.basket_wsol_ata)?;
+        let seeds = signer.basket_seeds();
+        let signer_seeds: [&[&[u8]]; 1] = [&seeds];
+        let ctx = CpiContext::new_with_signer(
+            self.program.key(),
+            lb_clmm::cpi::accounts::ClaimFee2 {
+                lb_pair: self.lb_pair.clone(),
+                position: position.clone(),
+                sender: self.basket.clone(),
+                reserve_x: self.reserve_x.clone(),
+                reserve_y: self.reserve_y.clone(),
+                user_token_x: self.basket_share_ata.clone(),
+                user_token_y: self.basket_wsol_ata.clone(),
+                token_x_mint: self.share_mint.clone(),
+                token_y_mint: self.wsol_mint.clone(),
+                token_program_x: self.token_program.clone(),
+                token_program_y: self.token_program.clone(),
+                memo_program: self.memo_program.clone(),
+                event_authority: self.event_authority.clone(),
+                program: self.program.clone(),
+            },
+            &signer_seeds,
+        )
+        .with_remaining_accounts(bin_arrays);
+        lb_clmm::cpi::claim_fee2(ctx, min_bin_id, max_bin_id, lb_clmm::types::RemainingAccountsInfo { slices: vec![] })?;
+        Ok(read_token_amount(self.basket_wsol_ata)? - before)
+    }
+
+    /// `close_position2`; rent to `rent_receiver`.
+    pub fn close_position(&self, signer: &BasketSigner, position: &AccountInfo<'info>, rent_receiver: &AccountInfo<'info>) -> Result<()> {
+        let seeds = signer.basket_seeds();
+        lb_clmm::cpi::close_position2(CpiContext::new_with_signer(
+            self.program.key(),
+            lb_clmm::cpi::accounts::ClosePosition2 {
+                position: position.clone(),
+                sender: self.basket.clone(),
+                rent_receiver: rent_receiver.clone(),
+                event_authority: self.event_authority.clone(),
+                program: self.program.clone(),
+            },
+            &[&seeds],
+        ))
+    }
+
+    /// `initialize_position_pda` owned by the basket with `base` = the
+    /// basket (tight) or the share authority (backstop), then grown to
+    /// `width` in ≤ 91-bin steps. `payer` funds the rent. Returns the rent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn init_position(
+        &self,
+        signer: &BasketSigner,
+        position: &AccountInfo<'info>,
+        base_is_share_auth: bool,
+        base: &AccountInfo<'info>,
+        payer: &AccountInfo<'info>,
+        rent: &AccountInfo<'info>,
+        lower_bin_id: i32,
+        width: i32,
+    ) -> Result<u64> {
+        let expected = dlmm::position_pda(&self.lb_pair.key(), base.key, lower_bin_id, width);
+        require_keys_eq!(position.key(), expected, BasketError::PositionMismatch);
+        require!(position.data_is_empty(), BasketError::PositionMismatch);
+        let init_width = width.min(dlmm::DEFAULT_BIN_PER_POSITION);
+        let basket_seeds = signer.basket_seeds();
+        let auth_seeds = signer.share_auth_seeds();
+        let signers: &[&[&[u8]]] = if base_is_share_auth { &[&basket_seeds, &auth_seeds] } else { &[&basket_seeds] };
+        let before = payer.lamports();
+        lb_clmm::cpi::initialize_position_pda(
+            CpiContext::new_with_signer(
+                self.program.key(),
+                lb_clmm::cpi::accounts::InitializePositionPda {
+                    payer: payer.clone(),
+                    base: base.clone(),
+                    position: position.clone(),
+                    lb_pair: self.lb_pair.clone(),
+                    owner: self.basket.clone(),
+                    system_program: self.system_program.clone(),
+                    rent: rent.clone(),
+                    event_authority: self.event_authority.clone(),
+                    program: self.program.clone(),
+                },
+                signers,
+            ),
+            lower_bin_id,
+            init_width,
+        )?;
+        let target_upper = lower_bin_id + width - 1;
+        let mut upper = lower_bin_id + init_width - 1;
+        while upper < target_upper {
+            upper = (upper + dlmm::MAX_RESIZE_LENGTH).min(target_upper);
+            lb_clmm::cpi::increase_position_length2(
+                CpiContext::new_with_signer(
+                    self.program.key(),
+                    lb_clmm::cpi::accounts::IncreasePositionLength2 {
+                        funder: payer.clone(),
+                        lb_pair: self.lb_pair.clone(),
+                        position: position.clone(),
+                        owner: self.basket.clone(),
+                        system_program: self.system_program.clone(),
+                        event_authority: self.event_authority.clone(),
+                        program: self.program.clone(),
+                    },
+                    &[&basket_seeds],
+                ),
+                upper,
+            )?;
+        }
+        Ok(before.saturating_sub(payer.lamports()))
+    }
+
+    /// Create every missing bin array in `[lo_index, hi_index]` (accounts
+    /// found in `tail`), `funder` paying. Returns the rent paid (to be
+    /// reimbursed from the deposit) and the number created.
+    pub fn ensure_bin_arrays(
+        &self,
+        tail: &[AccountInfo<'info>],
+        funder: &AccountInfo<'info>,
+        lo_index: i64,
+        hi_index: i64,
+    ) -> Result<(u64, u8)> {
+        let mut rent = 0u64;
+        let mut created = 0u8;
+        for index in lo_index..=hi_index {
+            let key = dlmm::bin_array(&self.lb_pair.key(), index);
+            let ai = tail.iter().find(|a| *a.key == key).ok_or_else(|| error!(BasketError::BinArrayMismatch))?;
+            if !ai.data_is_empty() {
+                continue;
+            }
+            lb_clmm::cpi::initialize_bin_array(
+                CpiContext::new(
+                    self.program.key(),
+                    lb_clmm::cpi::accounts::InitializeBinArray {
+                        lb_pair: self.lb_pair.clone(),
+                        bin_array: ai.clone(),
+                        funder: funder.clone(),
+                        system_program: self.system_program.clone(),
+                    },
+                ),
+                index,
+            )?;
+            rent += ai.lamports();
+            created += 1;
+        }
+        Ok((rent, created))
+    }
+}
+
+/// Writable bin-array infos for `[lower, upper]` looked up by address in
+/// `tail` (for CPIs before a `PoolView` exists, e.g. right after creating
+/// the arrays).
+pub fn bin_arrays_from_tail<'info>(tail: &[AccountInfo<'info>], lb_pair: &Pubkey, lower: i32, upper: i32) -> Result<Vec<AccountInfo<'info>>> {
+    let (lo, hi) = dlmm::bin_array_range(lower, upper);
+    (lo..=hi)
+        .map(|i| {
+            let key = dlmm::bin_array(lb_pair, i);
+            tail.iter().find(|a| *a.key == key).cloned().ok_or_else(|| error!(BasketError::BinArrayMismatch))
+        })
+        .collect()
+}
+
+/// Bins of `[lower, upper]` on each side of `active`: `(x_bins, y_bins)`,
+/// the active bin counting on both sides (Spot puts both tokens there).
+pub fn side_bins(lower: i32, upper: i32, active: i32) -> (u64, u64) {
+    if upper < lower {
+        return (0, 0);
+    }
+    let x = (upper - active.max(lower) + 1).max(0) as u64;
+    let y = (active.min(upper) - lower + 1).max(0) as u64;
+    (x, y)
 }

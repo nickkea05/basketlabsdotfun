@@ -19,10 +19,8 @@ pub enum BasketError {
     TooManyAssets,
     #[msg("Token program does not own this mint")]
     BadTokenProgram,
-    #[msg("Creator signature missing or does not cover this payload")]
+    #[msg("Attestation signature missing or does not cover this payload")]
     BadSignature,
-    #[msg("This signed payload was already used")]
-    ReplayDetected,
     #[msg("Name longer than 32 bytes")]
     NameTooLong,
     #[msg("Symbol longer than 10 bytes")]
@@ -77,8 +75,6 @@ pub enum BasketError {
     ComponentMismatch,
     #[msg("Pool account does not match the basket")]
     PoolMismatch,
-    #[msg("Payload domain does not bind this program and cluster")]
-    BadDomain,
     #[msg("Gate or schedule parameters are invalid")]
     InvalidGate,
     #[msg("Whitelist is full")]
@@ -107,4 +103,24 @@ pub enum BasketError {
     SwapProgramNotAllowed,
     #[msg("Swap touches a basket account other than the declared vaults")]
     UnexpectedAccountInSwap,
+    #[msg("Sleeve SOL leg does not match the launch bin price")]
+    LaunchPriceMismatch,
+    #[msg("Backstop is not in the state this instruction needs")]
+    BackstopState,
+    #[msg("Bin array account missing or does not belong to this pool")]
+    BinArrayMismatch,
+    #[msg("Position account does not match the basket")]
+    PositionMismatch,
+    #[msg("Active bin is still inside the trigger band")]
+    RecenterNotNeeded,
+    #[msg("Re-centred too recently")]
+    RecenterTooSoon,
+    #[msg("$BSKT mint is not set or is already set")]
+    BsktMintState,
+    #[msg("Prize epoch has not ended or was already paid")]
+    PrizeEpoch,
+    #[msg("Recipient is not eligible for a prize")]
+    PrizeIneligible,
+    #[msg("Fee settlement swap did not land where expected")]
+    SettleMismatch,
 }

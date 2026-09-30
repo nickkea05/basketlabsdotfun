@@ -1,10 +1,10 @@
-//! `Basket` — one per launch — and the creator-signed payload that creates it.
+//! `Basket` — one per launch — and the deployer's launch payload.
 
 use anchor_lang::prelude::*;
 
 use crate::constants::*;
 use crate::error::BasketError;
-use crate::state::config::{ManagedRules, PriceRange};
+use crate::state::config::{ManagedRules, PoolPreset};
 
 /// D6. Time-based, immutable after creation.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, Debug, PartialEq, Eq)]
@@ -36,27 +36,16 @@ impl ReopenSchedule {
     }
 }
 
-/// D19 domain separator: binds the signed payload to this program, this
-/// cluster and one creator nonce. The nonce also seeds the share mint PDA,
-/// so replaying a payload derives an existing mint and fails.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Domain {
-    pub program_id: Pubkey,
-    pub cluster: u8,
-    pub nonce: u64,
-}
-
-/// What the creator signs at "Launch" (frontend `buildLaunchParams()` plus
-/// the fields the confirmation doc added). The first buyer submits it
-/// verbatim inside `create_basket`; the ed25519 precompile instruction in the
-/// same transaction covers exactly `borsh(CreateBasketArgs)`.
+/// What the deployer submits at "Launch" (frontend `buildLaunchParams()`).
+/// The deployer signs `create_basket` directly (change order §2.2), so
+/// there is no signed payload any more; `nonce` only salts the share mint
+/// PDA so one wallet can launch more than once.
 ///
 /// The asset list itself is not in the payload; `book_hash` commits to it
 /// (chain hash, see `Basket::chain_hash`) and `add_positions` delivers it.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct CreateBasketArgs {
-    pub domain: Domain,
-    pub creator: Pubkey,
+    pub nonce: u64,
     pub basket_type: u8,
     /// `FIXED_KIND_*`, Fixed only; 0 otherwise.
     pub fixed_kind: u8,
@@ -78,12 +67,36 @@ pub struct CreateBasketArgs {
     pub perf_fee_bps: u16,
     pub gate: MintGate,
     pub schedule: Option<ReopenSchedule>,
+    /// DLMM active bin at launch: one base share unit costs
+    /// `(1 + bin_step/10⁴)^launch_active_id` lamports. The client derives it
+    /// from the intended NAV per share; `seed` checks the first buy against it.
+    pub launch_active_id: i32,
+}
+
+/// Q10: keeper-signed leaderboard tier, verified by the ed25519 precompile
+/// over `borsh(TierMessage)`. Missing or expired → tier 0.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TierAttestation {
+    pub keeper: Pubkey,
+    pub tier: u8,
+    pub expiry_slot: u64,
+}
+
+/// The bytes the keeper signs for a tier attestation.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TierMessage {
+    pub program_id: Pubkey,
+    pub cluster: u8,
+    pub creator: Pubkey,
+    pub tier: u8,
+    pub expiry_slot: u64,
 }
 
 /// `seed` (§5): the first buy. `deposits[i]` is the amount of position `i`
 /// (book order) delivered in kind; `initial_shares` is the gross X the buyer
 /// is paying for (the program never prices, D4); `sleeve_lamports` is the
-/// SOL leg, `r·D` by the client's split. Pool opens at `sleeve / Y`.
+/// SOL leg, `r·D` by the client's split. It must agree with the launch bin:
+/// `sleeve_lamports ≈ Y × price(launch_active_id)` within one bin step.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct SeedArgs {
     pub deposits: Vec<u64>,
@@ -92,7 +105,7 @@ pub struct SeedArgs {
 }
 
 /// `mint` (§5). Shares follow the creation-unit rule over `deposits`; the
-/// pool then dictates the SOL leg. `min_shares_out` and
+/// active bin then prices the SOL leg. `min_shares_out` and
 /// `max_sleeve_lamports` are the buyer's slippage bounds.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug, PartialEq, Eq)]
 pub struct MintArgs {
@@ -101,20 +114,45 @@ pub struct MintArgs {
     pub max_sleeve_lamports: u64,
 }
 
-/// Per-basket fee schedule, copied from `Config` at creation (D11, §4).
+/// Per-basket fee schedule, copied from `Config` at creation (D11, §4,
+/// change order §4). The four split lines sum to `BPS_TOTAL`.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, Debug, Default, PartialEq, Eq)]
 pub struct FeeSchedule {
     pub mint_fee_bps: u16,
     pub redeem_fee_bps: u16,
-    pub holder_split_bps: u16,
     pub creator_split_bps: u16,
-    pub protocol_split_bps: u16,
+    pub buyback_split_bps: u16,
+    pub team_split_bps: u16,
+    pub prize_split_bps: u16,
     /// Managed only, else 0.
     pub mgmt_fee_bps_per_year: u16,
     /// Managed only, else 0.
     pub perf_fee_bps: u16,
-    /// DAMM v2 base fee after any launch scheduler.
-    pub pool_fee_bps: u16,
+}
+
+/// One fee amount split four ways; the creator line is exact, the rest is
+/// shared pro rata by the config lines so the pieces always add up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FeeSplit {
+    pub creator: u64,
+    pub buyback: u64,
+    pub team: u64,
+    pub prize: u64,
+}
+
+impl FeeSchedule {
+    pub fn split(&self, amount: u64) -> Result<FeeSplit> {
+        let creator = crate::math::bps(amount, self.creator_split_bps)?;
+        let rest = amount - creator;
+        let others = self.buyback_split_bps as u64 + self.team_split_bps as u64 + self.prize_split_bps as u64;
+        if others == 0 {
+            return Ok(FeeSplit { creator: amount, buyback: 0, team: 0, prize: 0 });
+        }
+        let buyback = crate::math::mul_div_u64(rest, self.buyback_split_bps as u64, others, crate::math::Rounding::Down)?;
+        let team = crate::math::mul_div_u64(rest, self.team_split_bps as u64, others, crate::math::Rounding::Down)?;
+        let prize = rest - buyback - team;
+        Ok(FeeSplit { creator, buyback, team, prize })
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, Debug, Default, PartialEq, Eq)]
@@ -123,14 +161,52 @@ pub struct SleeveParams {
     pub step_threshold_lamports: u64,
     /// After the step phase.
     pub r_bps: u16,
-    pub price_range: PriceRange,
 }
 
-impl Default for PriceRange {
-    fn default() -> Self {
-        PriceRange::Full
+/// The basket's DLMM pool (created in `create_basket`) and its preset.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, Debug, Default, PartialEq, Eq)]
+pub struct PoolParams {
+    pub lb_pair: Pubkey,
+    pub preset: PoolPreset,
+    pub launch_active_id: i32,
+}
+
+/// One DLMM position the basket PDA owns. `key` is the PDA
+/// `["position", lb_pair, base, lower, width]` with base = basket (tight)
+/// or share_auth (backstop). Zero until placed.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, Debug, Default, PartialEq, Eq)]
+pub struct PositionRef {
+    pub key: Pubkey,
+    pub lower_bin_id: i32,
+    pub upper_bin_id: i32,
+}
+
+impl PositionRef {
+    pub fn is_set(&self) -> bool {
+        self.key != Pubkey::default()
+    }
+
+    pub fn width(&self) -> i32 {
+        self.upper_bin_id - self.lower_bin_id + 1
+    }
+
+    pub fn contains(&self, bin_id: i32) -> bool {
+        self.is_set() && bin_id >= self.lower_bin_id && bin_id <= self.upper_bin_id
     }
 }
+
+/// Backstop lifecycle (progress §6.4a; funding and withdrawal are chunked
+/// per bin array because a whole-range add or remove does not fit one tx).
+pub const BACKSTOP_UNPLACED: u8 = 0;
+/// Position and bin arrays exist; `fund_backstop` still has arrays to fill
+/// (`backstop_mask` = arrays funded so far).
+pub const BACKSTOP_FUNDING: u8 = 1;
+/// Fully funded; mints add their slice; the keeper never moves it.
+pub const BACKSTOP_LIVE: u8 = 2;
+/// `withdraw_backstop` in progress (`backstop_mask` = arrays emptied).
+pub const BACKSTOP_WITHDRAWING: u8 = 3;
+/// Emptied and closed; awaiting `reset_backstop` (re-place) or `close_basket`.
+pub const BACKSTOP_CLOSED: u8 = 4;
 
 /// State of an in-flight Mirror/Strategy/Managed rebalance.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, InitSpace, Debug, Default, PartialEq, Eq)]
@@ -164,8 +240,12 @@ pub struct Basket {
     pub host_weighting: u8,
     pub complete: bool,
     pub seeded: bool,
+    /// Attested leaderboard tier at create (Q10).
+    pub creator_tier: u8,
+    /// The deployer: signs `create_basket`, makes the first buy, gets the
+    /// deposit and rents back at close. Also `payer` (kept separate for the
+    /// indexer and for events).
     pub creator: Pubkey,
-    /// Paid the rent; refunded by `close_basket`.
     pub payer: Pubkey,
     pub share_mint: Pubkey,
     pub nonce: u64,
@@ -178,7 +258,7 @@ pub struct Basket {
 
     pub asset_count: u16,
     pub position_count: u16,
-    /// Signed commitment to the book (`CreateBasketArgs.book_hash`).
+    /// Commitment to the book (`CreateBasketArgs.book_hash`).
     pub book_hash: [u8; 32],
     /// Running chain hash while positions are being added.
     pub book_acc: [u8; 32],
@@ -193,11 +273,28 @@ pub struct Basket {
     pub gate: MintGate,
     pub schedule: Option<ReopenSchedule>,
 
-    /// DAMM v2 pool, position NFT mint and position account. Zero until
-    /// `seed`.
-    pub pool: Pubkey,
-    pub position_nft_mint: Pubkey,
-    pub pool_position: Pubkey,
+    pub pool: PoolParams,
+    /// Re-centred by the keeper; where fills happen. Set at `seed`.
+    pub tight: PositionRef,
+    /// Placed once by the keeper after `seed`, whole bin arrays around the
+    /// launch bin; withdrawn only by `withdraw_backstop`.
+    pub backstop: PositionRef,
+    pub backstop_state: u8,
+    /// Bit per backstop bin array (from `backstop.lower_bin_id`'s array):
+    /// funded (FUNDING) or emptied (WITHDRAWING).
+    pub backstop_mask: u8,
+    pub last_recenter_ts: i64,
+    pub recenter_count: u32,
+
+    /// Change order §2.2: deployer's deposit held on this account, and the
+    /// non-refundable part (pool + bin-array rent) spent from it so far.
+    pub deposit_lamports: u64,
+    pub deposit_spent_lamports: u64,
+
+    /// Q9: pool-fee SOL claimed in the current and previous prize epochs.
+    pub fee_epoch: u64,
+    pub fee_epoch_lamports: u64,
+    pub fee_prev_epoch_lamports: u64,
 
     /// Shares burned by `redeem_begin` whose components have not all been
     /// paid out yet. Added back to the holder-share denominator so the
@@ -219,8 +316,7 @@ pub struct Basket {
 impl Basket {
     /// `acc' = sha256(acc || mint || weight_bps_le)`; `acc0 = [0; 32]`.
     pub fn chain_hash(acc: &[u8; 32], mint: &Pubkey, weight_bps: u16) -> [u8; 32] {
-        solana_sha256_hasher::hashv(&[acc, mint.as_ref(), &weight_bps.to_le_bytes()])
-            .to_bytes()
+        solana_sha256_hasher::hashv(&[acc, mint.as_ref(), &weight_bps.to_le_bytes()]).to_bytes()
     }
 
     pub fn is_managed(&self) -> bool {
@@ -230,11 +326,6 @@ impl Basket {
     /// Mirror, Managed and Strategy books can change; Fixed cannot (D20).
     pub fn book_is_mutable(&self) -> bool {
         self.basket_type != BASKET_TYPE_FIXED
-    }
-
-    /// D13: launch fee scheduler only for non-Open gates.
-    pub fn uses_launch_scheduler(&self) -> bool {
-        self.gate != MintGate::Open
     }
 
     pub fn gate_open_at(&self, now: i64) -> bool {
@@ -248,6 +339,32 @@ impl Basket {
 
     pub fn touch(&mut self, now: i64) {
         self.last_activity_at = now;
+    }
+
+    pub fn backstop_live(&self) -> bool {
+        self.backstop_state == BACKSTOP_LIVE
+    }
+
+    /// Pool-fee SOL this basket claimed during `epoch`, as far as the
+    /// two-epoch window remembers.
+    pub fn epoch_pool_fees(&self, epoch: u64) -> u64 {
+        if epoch == self.fee_epoch {
+            self.fee_epoch_lamports
+        } else if epoch + 1 == self.fee_epoch {
+            self.fee_prev_epoch_lamports
+        } else {
+            0
+        }
+    }
+
+    /// Record `lamports` of claimed pool fees in `epoch`, rolling the window.
+    pub fn record_pool_fees(&mut self, epoch: u64, lamports: u64) {
+        if epoch != self.fee_epoch {
+            self.fee_prev_epoch_lamports = if epoch == self.fee_epoch + 1 { self.fee_epoch_lamports } else { 0 };
+            self.fee_epoch = epoch;
+            self.fee_epoch_lamports = 0;
+        }
+        self.fee_epoch_lamports = self.fee_epoch_lamports.saturating_add(lamports);
     }
 }
 

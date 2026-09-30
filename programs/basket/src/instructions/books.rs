@@ -35,7 +35,6 @@ use anchor_spl::token_2022::Token2022;
 use anchor_spl::token_interface::{self, TokenAccount};
 
 use crate::constants::*;
-use crate::damm::cp_amm;
 use crate::error::BasketError;
 use crate::events::*;
 use crate::instructions::crystallize::accrue_mgmt_fee;
@@ -106,7 +105,7 @@ pub struct SubmitBook<'info> {
     #[account(mut)]
     pub signer: Signer<'info>,
     #[account(seeds = [seeds::CONFIG], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(seeds = [seeds::WHITELIST], bump = whitelist.bump)]
     pub whitelist: Account<'info, Whitelist>,
     #[account(
@@ -115,7 +114,7 @@ pub struct SubmitBook<'info> {
         bump = basket.bump,
         has_one = share_mint,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     /// CHECK: `basket.share_mint`.
     pub share_mint: UncheckedAccount<'info>,
     /// CHECK: `["pending", share_mint]`, created here on first use.
@@ -223,7 +222,7 @@ pub struct OpenPosition<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     #[account(seeds = [seeds::CONFIG], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(seeds = [seeds::WHITELIST], bump = whitelist.bump)]
     pub whitelist: Account<'info, Whitelist>,
     #[account(
@@ -232,7 +231,7 @@ pub struct OpenPosition<'info> {
         bump = basket.bump,
         has_one = share_mint,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     /// CHECK: `basket.share_mint`.
     pub share_mint: UncheckedAccount<'info>,
     #[account(seeds = [seeds::PENDING, share_mint.key().as_ref()], bump = pending_book.bump)]
@@ -282,17 +281,15 @@ pub struct ApplyBook<'info> {
     #[account(mut)]
     pub caller: Signer<'info>,
     #[account(seeds = [seeds::CONFIG], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(
         mut,
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
         has_one = creator @ BasketError::Unauthorized,
-        has_one = pool @ BasketError::PoolMismatch,
-        has_one = pool_position @ BasketError::PoolMismatch,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     #[account(mut)]
     pub share_mint: Account<'info, anchor_spl::token::Mint>,
     /// CHECK: mint authority PDA, seeds checked.
@@ -305,14 +302,21 @@ pub struct ApplyBook<'info> {
     pub creator_share_ata: UncheckedAccount<'info>,
     #[account(seeds = [seeds::PENDING, share_mint.key().as_ref()], bump = pending_book.bump)]
     pub pending_book: Account<'info, PendingBook>,
-    pub pool: AccountLoader<'info, cp_amm::accounts::Pool>,
-    pub pool_position: AccountLoader<'info, cp_amm::accounts::Position>,
+    /// CHECK: ATA(basket, share_mint) — idle shares for the denominator.
+    pub basket_share_ata: UncheckedAccount<'info>,
+    /// CHECK: the basket's DLMM pool.
+    pub lb_pair: UncheckedAccount<'info>,
+    /// CHECK: the tight position.
+    pub tight_position: UncheckedAccount<'info>,
+    /// CHECK: the backstop position (any account when the basket has none).
+    pub backstop_position: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
 }
 
-pub fn handle_apply_book(ctx: Context<ApplyBook>, current_book: Vec<PositionArg>) -> Result<()> {
+/// Remaining accounts: the pool's bin arrays.
+pub fn handle_apply_book<'info>(ctx: Context<'info, ApplyBook<'info>>, current_book: Vec<PositionArg>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     let config = &ctx.accounts.config;
     require!(!config.paused, BasketError::Paused);
@@ -346,9 +350,16 @@ pub fn handle_apply_book(ctx: Context<ApplyBook>, current_book: Vec<PositionArg>
 
     // Management fee up to now, so the fee base is the pre-trade book.
     let h = {
-        let pool = ctx.accounts.pool.load()?;
-        let position = ctx.accounts.pool_position.load()?;
-        holder_shares(ctx.accounts.share_mint.supply, &pool, &position, ctx.accounts.basket.pending_redeem_shares)?
+        let view = PoolView::load(
+            &ctx.accounts.basket,
+            &ctx.accounts.basket.key(),
+            &ctx.accounts.lb_pair.to_account_info(),
+            Some(&ctx.accounts.tight_position.to_account_info()),
+            Some(&ctx.accounts.backstop_position.to_account_info()),
+            ctx.remaining_accounts,
+        )?;
+        let idle = idle_amount(&ctx.accounts.basket_share_ata.to_account_info())?;
+        view.holder_shares(ctx.accounts.share_mint.supply, idle, ctx.accounts.basket.pending_redeem_shares)?
     };
     let share_mint = ctx.accounts.share_mint.to_account_info();
     let token_program = ctx.accounts.token_program.to_account_info();
@@ -389,13 +400,13 @@ pub fn handle_apply_book(ctx: Context<ApplyBook>, current_book: Vec<PositionArg>
 pub struct ExecuteSwap<'info> {
     pub keeper: Signer<'info>,
     #[account(seeds = [seeds::CONFIG], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     /// CHECK: `basket.share_mint`.
     pub share_mint: UncheckedAccount<'info>,
     /// CHECK: `["pending", share_mint]`; read by hand so a missing account
@@ -532,14 +543,14 @@ pub fn handle_execute_swap<'info>(
 pub struct ClosePosition<'info> {
     pub keeper: Signer<'info>,
     #[account(seeds = [seeds::CONFIG], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(
         mut,
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     /// CHECK: `basket.share_mint`.
     pub share_mint: UncheckedAccount<'info>,
     #[account(seeds = [seeds::PENDING, share_mint.key().as_ref()], bump = pending_book.bump)]
@@ -593,14 +604,14 @@ pub fn handle_close_position(ctx: Context<ClosePosition>) -> Result<()> {
 pub struct FinalizeRebalance<'info> {
     pub keeper: Signer<'info>,
     #[account(seeds = [seeds::CONFIG], bump = config.bump)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(
         mut,
         seeds = [seeds::BASKET, share_mint.key().as_ref()],
         bump = basket.bump,
         has_one = share_mint,
     )]
-    pub basket: Account<'info, Basket>,
+    pub basket: Box<Account<'info, Basket>>,
     /// CHECK: `basket.share_mint`.
     pub share_mint: UncheckedAccount<'info>,
     #[account(mut, seeds = [seeds::PENDING, share_mint.key().as_ref()], bump = pending_book.bump)]

@@ -19,7 +19,7 @@ pub struct InitializeConfig<'info> {
         seeds = [seeds::CONFIG],
         bump,
     )]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(
         init,
         payer = admin,
@@ -47,6 +47,8 @@ pub fn handle_initialize_config(
     config.paused = false;
     config.admin = ctx.accounts.admin.key();
     config.treasury = treasury;
+    // Devnet placeholder until the Squads vault exists (Q13).
+    config.team_wallet = treasury;
     config.whitelist_authority = ctx.accounts.admin.key();
     config.keepers = keepers;
     config.fees = FeeDefaults::default();
@@ -54,8 +56,13 @@ pub fn handle_initialize_config(
     config.managed = ManagedRules::default();
     config.rebalance_window_s = DEFAULT_REBALANCE_WINDOW_S;
     config.close_idle_s = DEFAULT_CLOSE_IDLE_S;
-    config.graduation_lamports = DEFAULT_GRADUATION_LAMPORTS;
-    config.scheduler = LaunchScheduler::default();
+    config.pools = PoolDefaults::default();
+    config.deposit_lamports = DEFAULT_DEPOSIT_LAMPORTS;
+    config.mint_window = MintWindow::default();
+    config.allow_open_gate = false;
+    config.bskt_mint = None;
+    config.prizes = PrizeParams::default();
+    config.creator_tier_bps = [DEFAULT_CREATOR_SPLIT_BPS; TIER_COUNT];
     config.swap_programs = vec![JUPITER_V6_ID];
     config.rebalance_tolerance_bps = DEFAULT_REBALANCE_TOLERANCE_BPS;
     apply_update(config, update)?;
@@ -78,6 +85,9 @@ fn apply_update(config: &mut Config, u: ConfigUpdate) -> Result<()> {
     }
     if let Some(v) = u.treasury {
         config.treasury = v;
+    }
+    if let Some(v) = u.team_wallet {
+        config.team_wallet = v;
     }
     if let Some(v) = u.whitelist_authority {
         config.whitelist_authority = v;
@@ -105,12 +115,27 @@ fn apply_update(config: &mut Config, u: ConfigUpdate) -> Result<()> {
         require!(v > 0, BasketError::InvalidArgument);
         config.close_idle_s = v;
     }
-    if let Some(v) = u.graduation_lamports {
-        config.graduation_lamports = v;
+    if let Some(v) = u.pools {
+        require!(v.validate(), BasketError::InvalidArgument);
+        config.pools = v;
     }
-    if let Some(v) = u.scheduler {
-        require!(v.cliff_bps <= 9_900 && v.period_s > 0, BasketError::InvalidArgument);
-        config.scheduler = v;
+    if let Some(v) = u.deposit_lamports {
+        config.deposit_lamports = v;
+    }
+    if let Some(v) = u.mint_window {
+        require!(v.validate(), BasketError::InvalidGate);
+        config.mint_window = v;
+    }
+    if let Some(v) = u.allow_open_gate {
+        config.allow_open_gate = v;
+    }
+    if let Some(v) = u.prizes {
+        require!(v.validate(), BasketError::InvalidArgument);
+        config.prizes = v;
+    }
+    if let Some(v) = u.creator_tier_bps {
+        require!(v.iter().all(|b| *b <= BPS_TOTAL), BasketError::FeeOutOfBounds);
+        config.creator_tier_bps = v;
     }
     if let Some(v) = u.swap_programs {
         require!(v.len() <= MAX_SWAP_PROGRAMS, BasketError::InvalidArgument);
@@ -127,7 +152,7 @@ fn apply_update(config: &mut Config, u: ConfigUpdate) -> Result<()> {
 pub struct AdminOnly<'info> {
     pub admin: Signer<'info>,
     #[account(mut, seeds = [seeds::CONFIG], bump = config.bump, has_one = admin @ BasketError::Unauthorized)]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
 }
 
 pub fn handle_update_config(ctx: Context<AdminOnly>, update: ConfigUpdate) -> Result<()> {
@@ -149,6 +174,15 @@ pub fn handle_set_paused(ctx: Context<AdminOnly>, paused: bool) -> Result<()> {
     Ok(())
 }
 
+/// Q8: set exactly once; immutable afterwards. The timelock is the Squads
+/// multisig that holds `admin`.
+pub fn handle_set_bskt_mint(ctx: Context<AdminOnly>, mint: Pubkey) -> Result<()> {
+    require!(ctx.accounts.config.bskt_mint.is_none(), BasketError::BsktMintState);
+    ctx.accounts.config.bskt_mint = Some(mint);
+    emit!(BsktMintSet { mint });
+    Ok(())
+}
+
 #[derive(Accounts)]
 #[instruction(add: Vec<WhitelistEntry>, remove: Vec<Pubkey>)]
 pub struct UpdateWhitelist<'info> {
@@ -159,7 +193,7 @@ pub struct UpdateWhitelist<'info> {
         bump = config.bump,
         constraint = config.whitelist_authority == authority.key() || config.admin == authority.key() @ BasketError::Unauthorized,
     )]
-    pub config: Account<'info, Config>,
+    pub config: Box<Account<'info, Config>>,
     #[account(
         mut,
         seeds = [seeds::WHITELIST],
