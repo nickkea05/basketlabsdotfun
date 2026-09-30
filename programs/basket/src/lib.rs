@@ -8,6 +8,7 @@
 
 pub mod constants;
 pub mod damm;
+pub mod dlmm;
 pub mod ed25519;
 pub mod error;
 pub mod events;

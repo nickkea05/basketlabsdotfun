@@ -9,6 +9,7 @@
 
 pub mod ed25519_stub;
 pub mod books;
+pub mod dlmm;
 pub mod fees;
 pub mod lifecycle;
 pub mod managed;
@@ -16,6 +17,7 @@ pub mod redeem;
 pub mod sleeve;
 
 pub use books::*;
+pub use dlmm::*;
 pub use lifecycle::*;
 pub use managed::*;
 pub use redeem::*;
@@ -76,6 +78,7 @@ impl Env {
         svm.add_program(basket::id(), &program_bytes()).unwrap();
         svm.add_program(METAPLEX_ID, &fixture("mpl_token_metadata.so")).unwrap();
         svm.add_program(CP_AMM_ID, &fixture("cp_amm.so")).unwrap();
+        svm.add_program(dlmm::LB_CLMM_ID, &fixture("lb_clmm.so")).unwrap();
         // The wSOL native mint exists on every cluster; LiteSVM starts empty.
         let mut wsol_data = vec![0u8; spl_token::state::Mint::LEN];
         spl_token::state::Mint {

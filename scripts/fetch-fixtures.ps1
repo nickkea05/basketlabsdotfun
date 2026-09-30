@@ -17,7 +17,10 @@ $dir = Join-Path $root "programs\basket\tests\fixtures"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 $fixtures = @(
-    # Meteora DAMM v2 (cp-amm): pool + position CPI target for seed / mint / redeem.
+    # Meteora DLMM (lb_clmm): pool + two positions CPI target for seed / mint / redeem /
+    # recenter (change order 2026-09-30). IDL: idls/lb_clmm.json (dlmm-sdk idls/dlmm.json).
+    @{ Name = "lb_clmm.so";            Id = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo" },
+    # Meteora DAMM v2 (cp-amm): superseded by DLMM; kept until the migration lands.
     @{ Name = "cp_amm.so";             Id = "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG" },
     # Metaplex Token Metadata: share-mint metadata written at create_basket.
     @{ Name = "mpl_token_metadata.so"; Id = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s" }
