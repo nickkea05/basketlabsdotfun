@@ -111,12 +111,6 @@ pub const DEFAULT_CLOSE_IDLE_S: i64 = 14 * 24 * 60 * 60;
 /// liquidity→amount rounding in the pool position.
 pub const CLOSE_DUST_SHARES: u64 = 10;
 
-/// D15: a rewards root the keeper may close (unpaid remainder back to the
-/// holder reserve) once it is this old.
-pub const REWARDS_ROOT_TTL_S: i64 = 30 * 24 * 60 * 60;
-/// Bitmap cap per root (8 KiB); split larger epochs across roots.
-pub const MAX_REWARD_LEAVES: u32 = 65_536;
-
 /// Creator lock duration bounds.
 pub const MIN_CREATOR_LOCK_S: i64 = 24 * 60 * 60;
 pub const MAX_CREATOR_LOCK_S: i64 = 4 * 365 * 24 * 60 * 60;
@@ -140,7 +134,6 @@ pub mod seeds {
     pub const FEES: &[u8] = b"fees";
     pub const PENDING: &[u8] = b"pending";
     pub const CLAIM: &[u8] = b"claim";
-    pub const REWARDS: &[u8] = b"rewards";
     pub const LOCK: &[u8] = b"lock";
     pub const REDEMPTION: &[u8] = b"redemption";
 }

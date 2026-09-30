@@ -87,10 +87,6 @@ pub enum BasketError {
     ZeroAmount,
     #[msg("Basket still has supply or recent activity")]
     NotClosable,
-    #[msg("Merkle proof failed")]
-    BadProof,
-    #[msg("Reward already claimed")]
-    AlreadyClaimed,
     #[msg("Lock has not expired")]
     LockActive,
     #[msg("No rebalance in progress")]

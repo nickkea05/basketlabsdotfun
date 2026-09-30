@@ -423,7 +423,68 @@ bins ≈ 8 %); bin step 200 halves the array cost but doubles the tick.
 11. **Docs**: strike `program-build-confirmation.md` §3 range table, refresh
     frontend brief §6 / launch wizard copy, README status.
 
-### 6.4 Open questions for Nick (not covered by the change order — asked, not decided)
+### 6.4a Decisions (Nick, 2026-09-30, second round) — these are the spec now
+
+- **Fee currency (Q1).** Mint/redeem fees stay withheld as **shares** in the FeeVault.
+  `sweep_fees` pays the creator's 20 % in shares and **redeems the other 80 % in
+  kind** into FeeVault-owned component ATAs; a permissionless `settle_fees` swaps
+  those components to SOL through the allow-listed venue and routes the SOL
+  buyback / team / prizes (50 / 25 / 5 of the 80 %). Pools are created with
+  **`collect_fee_mode = OnlyY`** so every pool swap fee arrives as SOL and routes
+  straight to the four lines. Nothing in the fee path prices anything.
+- **Deposit (Q2/Q16).** Deployer eats the non-refundable rent out of the 1 SOL:
+  `deposit_lamports` / `deposit_spent_lamports`, refund at close = deposit − spent
+  (+ position rents). Launch screen shows the exact number. No graduation refund
+  (Q11): refund only at `close_basket`.
+- **Presets (Q3/Q4/Q5, Config defaults per type, creator cannot change, tune on
+  devnet):**
+
+  | type | bin step | base fee | tight | backstop | reset confirm |
+  | --- | --- | --- | --- | --- | --- |
+  | index / majors | 25 | 0.25 % | ±8 % (±31 bins) | ±40 %, ≤ 4 arrays | 3 checks |
+  | Mirror / Strategy | 50 | 0.5 % | ±12 % (±23 bins) | ±50 %, ≤ 4 arrays | 3 checks |
+  | meme / sector / Fixed | 100 | 1 % | ±15 % (±14 bins) | ±70 %, ≤ 4 arrays | 1 check |
+
+  Backstop is **one position, symmetric around the launch active bin**, placed as
+  whole bin arrays (cap 4 → ≤ 0.29 SOL non-refundable; narrow the width, never
+  raise the cap), holding ~20 % of the sleeve. The keeper's re-center loop never
+  moves it; withdrawn only on close; re-placed only by `reset_backstop` (keeper,
+  logged) when the active bin has been **outside its bin range** for N consecutive
+  keeper checks (N per type above; the count is keeper-side, the program checks
+  "outside now"), re-placed symmetrically at the type's width.
+- **Tight re-center (Q4).** `recenter_tight` when the active bin has moved past 70 %
+  of the half-width from centre, or is out of range; **5-minute minimum interval**
+  between re-centres of the same basket. Built as: the interval applies to the 70 %
+  trigger; an out-of-range active bin may always be re-centred (speed is priority 5).
+- **Backstop funding (Q6/Q15).** Deployer's launch tx places `tight` from the first
+  buy; the **keeper places the backstop within the first minute** from the sleeve
+  slice of that buy, rent from the deposit. **Every later mint** adds 20 % of its
+  sleeve to the existing backstop position; if price has left the backstop the add
+  goes to `tight` instead (no new bin arrays on the mint path).
+- **Treasury-share top-up at re-center (Q7).** Allowed **while the mint gate is
+  open** (mint treasury shares at the active-bin price to rebuild asks). Gate closed
+  → no: asks come only from holders selling; that is the premium.
+- **Redeem (Q14).** Withdraws pro-rata from **`tight` only**, one transaction. The
+  backstop is a protocol-level guarantee, counted in NAV, settled at close.
+- **Buyback (Q8).** BUYBACK PDA accrues SOL. `Config.bskt_mint: Option<Pubkey>`
+  starts `None`; `execute_buyback` refuses while unset; admin sets it **once** under
+  the treasury timelock, then immutable.
+- **Prizes (Q9).** `post_prize_payout(epoch, recipients[])` keeper-signed; on-chain
+  checks: epoch elapsed, total ≤ PRIZE balance, count ≤ Config max, each recipient
+  has a live `CreatorLock`, each recipient's basket claimed ≥
+  `Config.min_epoch_pool_fees` SOL of pool fees during the epoch (needs per-basket
+  epoch counters on `claim_pool_fees`). Ranking / follower PnL off-chain.
+- **Mint window (Q12).** 48 h default, 24–72 h bounds. **Team wallet (Q13).**
+  `Config.team_wallet`, timelocked admin change, no per-basket override; devnet
+  placeholder key, Squads vault before mainnet.
+- **Creator tier (Q10).** Keeper-signed **ed25519 attestation over
+  `(creator, tier, expiry_slot)`** passed as an argument to `create_basket`, keeper
+  key from Config; missing/expired → base tier. Keep `ed25519.rs` for this; delete
+  only the creator-signature / replay path. Tier → creator bps table lives in Config
+  (defaults all 2000 until Nick sets the ladder — **still open: values and which
+  line funds the bump**).
+
+### 6.4 Open questions (asked 2026-09-30; answered in 6.4a — kept for the reasoning)
 
 Q1. **Fee currency.** Today mint/redeem fees are withheld as *shares* into the
     FeeVault. Buyback, team and prizes need *SOL*. Options: (a) charge mint and

@@ -167,31 +167,6 @@ pub mod basket {
         handle_finalize_rebalance(ctx, entries)
     }
 
-    // ---- rewards (D15) ----
-
-    /// Keeper: commit an epoch's Merkle root, funded from the holder reserve
-    /// (`reward_mint` = share mint or native mint).
-    pub fn post_rewards_root(
-        ctx: Context<PostRewardsRoot>,
-        epoch: u64,
-        root: [u8; 32],
-        reward_mint: Pubkey,
-        total_amount: u64,
-        leaf_count: u32,
-    ) -> Result<()> {
-        handle_post_rewards_root(ctx, epoch, root, reward_mint, total_amount, leaf_count)
-    }
-
-    /// Anyone: pay one leaf to its wallet.
-    pub fn distribute_rewards(ctx: Context<DistributeRewards>, index: u32, amount: u64, proof: Vec<[u8; 32]>) -> Result<()> {
-        handle_distribute_rewards(ctx, index, amount, proof)
-    }
-
-    /// Keeper: retire a paid or stale root; the unpaid remainder returns to the reserve.
-    pub fn close_rewards_root(ctx: Context<CloseRewardsRoot>) -> Result<()> {
-        handle_close_rewards_root(ctx)
-    }
-
     // ---- creator lock ----
 
     pub fn lock_creator_shares(ctx: Context<LockCreatorShares>, amount: u64, duration_s: i64) -> Result<()> {

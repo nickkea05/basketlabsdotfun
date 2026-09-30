@@ -1,5 +1,5 @@
 //! Smaller per-basket accounts: `FeeVault`, `PendingBook`, `FrozenClaim`,
-//! `RewardsRoot`, `CreatorLock`, `Redemption`.
+//! `CreatorLock`, `Redemption`.
 
 use anchor_lang::prelude::*;
 
@@ -7,9 +7,9 @@ use crate::state::position::PositionArg;
 
 /// `["fees", share_mint]`. Owns two ATAs: the share mint (mint/redeem fee
 /// skims, D11) and wSOL (pool swap fees, D3). Fees arrive unsplit; `sweep_fees`
-/// pays the creator and protocol lines out and leaves the holder line here
-/// for `distribute_rewards`. `holder_reserve_*` is what is already
-/// earmarked for holders and must not be split again.
+/// pays the creator and protocol lines out. `holder_reserve_*` is the legacy
+/// holder line (rewards removed by the change order); it is re-routed to the
+/// buyback when the fee split is rebuilt (progress §6.3 step 5).
 #[account]
 #[derive(InitSpace, Debug, Default)]
 pub struct FeeVault {
@@ -65,65 +65,6 @@ pub struct FrozenClaim {
     pub mint: Pubkey,
     pub amount: u64,
     pub created_at: i64,
-}
-
-/// `["rewards", share_mint, epoch_le]`. D15. `claimed` is a bitmap over
-/// leaf indices; the leaf is `sha256(0x00 || index_le || wallet || amount_le)`.
-#[account]
-#[derive(Debug)]
-pub struct RewardsRoot {
-    pub bump: u8,
-    pub basket: Pubkey,
-    /// Keeper who paid the rent; refunded when the root closes.
-    pub payer: Pubkey,
-    pub epoch: u64,
-    pub root: [u8; 32],
-    /// The share mint (rewards in shares) or the native mint (rewards in
-    /// SOL). Both are paid from the FeeVault's holder reserve.
-    pub reward_mint: Pubkey,
-    pub total_amount: u64,
-    pub distributed_amount: u64,
-    pub leaf_count: u32,
-    pub posted_at: i64,
-    pub claimed: Vec<u8>,
-}
-
-impl RewardsRoot {
-    pub fn space_for(leaf_count: u32) -> usize {
-        8 + 1 + 32 + 32 + 8 + 32 + 32 + 8 + 8 + 4 + 8 + 4 + leaf_count.div_ceil(8) as usize
-    }
-
-    pub fn is_native(&self) -> bool {
-        self.reward_mint == anchor_spl::token::spl_token::native_mint::ID
-    }
-
-    pub fn is_claimed(&self, index: u32) -> bool {
-        let (byte, bit) = ((index / 8) as usize, index % 8);
-        self.claimed.get(byte).map(|b| b & (1 << bit) != 0).unwrap_or(true)
-    }
-
-    pub fn set_claimed(&mut self, index: u32) {
-        let (byte, bit) = ((index / 8) as usize, index % 8);
-        if let Some(b) = self.claimed.get_mut(byte) {
-            *b |= 1 << bit;
-        }
-    }
-
-    pub fn leaf(index: u32, wallet: &Pubkey, amount: u64) -> [u8; 32] {
-        let index = index.to_le_bytes();
-        let amount = amount.to_le_bytes();
-        solana_sha256_hasher::hashv(&[&[0u8], &index[..], wallet.as_ref(), &amount[..]]).to_bytes()
-    }
-
-    /// Sorted-pair Merkle verification, `sha256(0x01 || min || max)`.
-    pub fn verify(root: &[u8; 32], leaf: [u8; 32], proof: &[[u8; 32]]) -> bool {
-        let mut node = leaf;
-        for sibling in proof {
-            let (a, b) = if node <= *sibling { (node, *sibling) } else { (*sibling, node) };
-            node = solana_sha256_hasher::hashv(&[&[1u8], &a[..], &b[..]]).to_bytes();
-        }
-        node == *root
-    }
 }
 
 /// `["lock", share_mint]`. Creator's locked self-position (leaderboard skin).

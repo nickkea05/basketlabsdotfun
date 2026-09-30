@@ -179,33 +179,6 @@ pub struct FeesSwept {
 }
 
 #[event]
-pub struct RewardsRootPosted {
-    pub basket: Pubkey,
-    pub epoch: u64,
-    pub root: [u8; 32],
-    pub reward_mint: Pubkey,
-    pub total_amount: u64,
-    pub leaf_count: u32,
-}
-
-#[event]
-pub struct RewardDistributed {
-    pub basket: Pubkey,
-    pub epoch: u64,
-    pub wallet: Pubkey,
-    pub amount: u64,
-    pub index: u32,
-}
-
-#[event]
-pub struct RewardsRootClosed {
-    pub basket: Pubkey,
-    pub epoch: u64,
-    pub distributed_amount: u64,
-    pub returned_amount: u64,
-}
-
-#[event]
 pub struct CreatorSharesLocked {
     pub basket: Pubkey,
     pub creator: Pubkey,
