@@ -5,7 +5,7 @@ Living log for the `basket` Anchor program build. Spec is
 written before handlers, LiteSVM, one test file per instruction, and any design
 question the spec leaves open gets **asked, not decided** (collected in §5 below).
 
-Last updated: 2026-09-28 (Phase 6 done and pushed, `ccf2364`).
+Last updated: 2026-09-28 (Phase 7 done and pushed, `1922db4`; all §5 instructions built).
 
 ---
 
@@ -20,13 +20,14 @@ Last updated: 2026-09-28 (Phase 6 done and pushed, `ccf2364`).
 | 4 | FeeVault, `claim_pool_fees`, `sweep_fees`, 40/30/30 split | done, green (`4abcb7d`) |
 | 5 | `crystallize` + HWM, management fee (gates/schedules already enforced in mint) | done, green (`9b952a4`) |
 | 6 | `submit_book` / `open_position` / `apply_book` / `execute_swap` / `close_position` / `finalize_rebalance` | done, green (`ccf2364`) |
-| 7 | `post_rewards_root` / `distribute_rewards`, creator lock/unlock, `close_basket`, admin | not started |
-| wrap | README/TODO refresh, present §5 to Nick | partly (fixtures script + gitignore done) |
+| 7 | `post_rewards_root` / `distribute_rewards` / `close_rewards_root`, `lock_creator_shares` / `unlock_creator_shares`, `close_positions` / `close_basket` (pause/admin were done in phase 1) | done, green (`1922db4`) |
+| 8 | Devnet: deploy, CU measurements on a real validator, batch UX end to end, indexer event coverage | not started |
+| wrap | README/TODO refresh, present §5 to Nick | done except the conversation |
 
-Last green run: **74/74** — unit 6, add_positions 4, apply_book 3, claim_pool_fees 3,
-create_basket 6, crystallize 6, execute_swap 4, finalize_rebalance 4,
-initialize_config 6, mint 6, redeem 6, seed 5, smoke 2, submit_book 5, sweep_fees 5,
-update_whitelist 3.
+Last green run: **82/82** — unit 6, add_positions 4, apply_book 3, claim_pool_fees 3,
+close_basket 3, create_basket 6, creator_lock 2, crystallize 6, execute_swap 4,
+finalize_rebalance 4, initialize_config 6, mint 6, redeem 6, rewards 3, seed 5,
+smoke 2, submit_book 5, sweep_fees 5, update_whitelist 3.
 
 ## 2. Restart checklist
 
@@ -37,12 +38,11 @@ From `c:\dev\ponsclone\basketfun`:
 2. `anchor build` — if the IDL step fails with a link error, repeat step 1 and rerun.
 3. `cargo.exe test -p basket --no-fail-fast -- --test-threads=1` (always `cargo.exe`:
    a stray 0-byte `C:\Windows\system32\cargo` triggers an "open with" popup).
-4. Next up: Phase 7. Start by writing `tests/rewards.rs`, `tests/creator_lock.rs`,
-   `tests/close_basket.rs` against the harness, then the handlers. State already
-   exists: `RewardsRoot` (bitmap, `leaf`, `verify`), `CreatorLock`, `FeeVault`
-   `holder_reserve_*` / `distributed_*`, events `RewardsRootPosted`,
-   `RewardDistributed`, `CreatorSharesLocked/Unlocked`, `BasketClosed`, errors
-   `BadProof`, `AlreadyClaimed`, `LockActive`, `NotClosable`.
+4. Next up: get Nick's answers on §5, fold them in (most are one-line changes),
+   then Phase 8 (devnet). Devnet needs a program keypair outside the repo,
+   `anchor keys sync`, a real Meteora cp-amm + Jupiter on devnet (Jupiter has no
+   devnet deployment — rebalance tests there will use the cp-amm venue path as the
+   LiteSVM tests do), and the TS client in `packages/solana` generated from the IDL.
 
 ## 3. Design as built (phases 3–6)
 
@@ -116,6 +116,40 @@ From `c:\dev\ponsclone\basketfun`:
   window expire and resubmitting (acc is reset by `submit_book`).
 - `mint` is refused while `rebalance.active` (`RebalanceActive`); `redeem` is not.
 
+### Rewards, creator lock, close (Phase 7)
+- `post_rewards_root(epoch, root, reward_mint, total_amount, leaf_count)`: keeper,
+  creates `RewardsRoot ["rewards", share_mint, epoch_le]` (bitmap sized to
+  `leaf_count`, ≤ 65_536). `reward_mint` is the share mint or the native mint; the
+  amount is debited from `FeeVault.holder_reserve_{shares,lamports}` at post time so
+  two roots cannot promise the same funds. Same epoch twice → `ReplayDetected`.
+  Leaf = `sha256(0x00 ‖ index_le ‖ wallet ‖ amount_le)`, node = `sha256(0x01 ‖ min ‖ max)`.
+- `distribute_rewards(index, amount, proof)`: anyone (keeper pushes). Pays from the
+  FeeVault (shares: to ATA(wallet) created by the caller; SOL: lamport move, refused
+  with `BelowMinimum` if the wallet would end below rent exemption). Sets the bit,
+  closes the root to its payer when fully paid.
+- `close_rewards_root`: keeper, when fully paid or `posted_at + 30 d`; unpaid
+  remainder returns to the reserve.
+- `lock_creator_shares(amount, duration_s)` / `unlock_creator_shares`: creator only;
+  1 d ≤ duration ≤ 4 y; top-ups add and extend (`unlock_at = max`), never shorten;
+  unlock returns everything and closes ATA + PDA. Not pausable.
+- Close crank, two instructions, both keeper-only and both gated by the same
+  precondition: no rebalance, no pending redemption, no PendingBook, idle ≥
+  `config.close_idle_s`, and holder shares `H ≤ FeeVault share balance + 10`
+  (i.e. nobody outside the fee stash holds anything; the +10 base units cover
+  liquidity→amount rounding in the pool position).
+  - `close_positions` (chunked, remaining `[position, vault, mint, treasury_ata]`):
+    vault dust → treasury ATA (keeper pays creation), vault + Position closed → rent
+    to `basket.payer`.
+  - `close_basket` (position_count == 0): seeded → `remove_liquidity` (all) with SOL
+    to ATA(treasury, wSOL), `claim_position_fee`, cp-amm `close_position` (rent →
+    payer), withdrawn shares burned, FeeVault fee shares burned + ATA closed,
+    FeeVault free SOL: `creator_owed` to creator (if rent-safe) and the rest to the
+    treasury, FeeVault + Basket closed → payer. Unseeded baskets pass `None` for
+    the pool/FeeVault accounts. Supply must end ≤ 10 base units (pool vault floor).
+- Runtime lesson: program-owned account closes (lamport moves without CPI) must
+  happen **after the last CPI** in the instruction, or the CPI boundary check
+  reports `UnbalancedInstruction`.
+
 ## 4. Measurements and hard limits (keep in README)
 
 - Mainnet **64 account-lock limit**: single-tx `seed` N ≤ 9 (26 fixed + 4N), `mint`
@@ -132,6 +166,9 @@ From `c:\dev\ponsclone\basketfun`:
 - claim_pool_fees ≈ 80–85k; sweep_fees small; crystallize 47k.
 - submit_book (1 new position) 51k; apply_book 44k; execute_swap (cp-amm inner) 38k;
   finalize_rebalance(3) 19k.
+- post_rewards_root 20k; distribute_rewards (shares, ATA created) 37k;
+  lock_creator_shares 43k; unlock 20k; close_positions(2) 73k; close_basket (seeded,
+  3 cp-amm CPIs) 144k; close_basket (unseeded) 23k.
 - Meteora cp-amm: creator = basket PDA (owns position NFT), payer = buyer; base fee
   layout is PodAlignedFeeTimeScheduler; scheduler ≤ 1 day; protocol takes 20% of swap
   fees before our split.
@@ -190,3 +227,27 @@ Each is easy to change; (a), (e), (t)–(v) touch account layouts.
   on-chain check that vault values actually match the new weights.
 - (ab) A rebalance whose window expired without `finalize_rebalance` keeps `mint`
   blocked until the keeper finalizes or resubmits; only the keeper can unstick it.
+- (ac) **Reward currency.** D15 says "the basket's flagship reward mint". Built:
+  rewards are paid in **shares or SOL** (whatever the FeeVault holds), chosen per
+  root. Paying in a component would need a swap in the crank (D17 forbids the
+  keeper sweeping pool SOL into components). Confirm shares/SOL is the intent.
+- (ad) Rewards funding is committed at `post_rewards_root` (debited from the
+  reserve), and a stale root can be closed by the keeper after **30 days**, returning
+  the unpaid remainder. Pick the TTL.
+- (ae) SOL reward leaves for wallets that would end below rent exemption are
+  refused (`BelowMinimum`); the keeper's batch should skip them and they come back
+  to the reserve at close. Alternative: pay in shares only.
+- (af) Creator lock bounds **1 day – 4 years**; top-ups extend to the later date.
+- (ag) `close_basket` semantics: "supply == 0" is unreachable literally (the
+  FeeVault's fee shares and the pool's treasury shares are supply), so the rule
+  built is "no holder shares outside the FeeVault (±10 base units) and idle 14 d".
+  On close the sleeve SOL, vault dust and any unswept fee SOL go to the **treasury**;
+  fee shares are burned; rents (Basket, Positions, vaults, FeeVault, cp-amm
+  position) go to `basket.payer`. Unswept creator/holder fee lines are forfeited to
+  the treasury — acceptable, or should `close_basket` run a final `sweep_fees`?
+- (ah) `close_basket` requires a fully swept-out `PendingBook` and no in-flight
+  `Redemption`; a holder who ran `redeem_begin` and never finished blocks the close
+  (their shares are burned already). Do we want a keeper path to force-complete a
+  stale Redemption?
+- (ai) Baskets created but never seeded are closable by the keeper after 14 d idle
+  (rent back to the creating payer). Shorter window for those?

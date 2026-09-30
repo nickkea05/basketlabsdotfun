@@ -15,9 +15,11 @@ Working rules:
 
 ## On-chain (Anchor)
 
-- [ ] **Program build in progress** — phase-by-phase state, restart checklist, CU /
-      account-limit measurements and the open design questions are in
-      `docs/program-progress.md`. Spec is `docs/program-build-confirmation.md`.
+- [ ] **Program: all spec instructions implemented and green on LiteSVM (phases
+      1–7)**; next is devnet (phase 8) and the sign-off on the open design questions.
+      Phase state, restart checklist, CU / account-limit measurements and the open
+      questions are in `docs/program-progress.md`. Spec is
+      `docs/program-build-confirmation.md`.
 - [x] Workspace ready: Anchor 1.2.0, Solana CLI 4.3.0, platform-tools v1.57, host
       Rust 1.96.1, LiteSVM 0.16. `anchor build` and `anchor test` pass on the empty
       `basket` program. See `programs/README.md` for the version matrix and Windows

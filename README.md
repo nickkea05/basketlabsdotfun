@@ -12,8 +12,11 @@ Three basket types:
 - **Managed** — the creator rebalances under a timelock and turnover cap that buyers
   can read before they buy.
 
-Status: pre-launch. The web app runs against mock data; the Anchor program is
-mid-build (see `docs/program-progress.md`). Nothing here should touch real money.
+Status: pre-launch. The web app runs against mock data. The Anchor program has
+every instruction in the spec implemented with LiteSVM tests (82 green), but it
+has not been deployed to devnet, reviewed, or audited, and a list of design
+decisions still awaits sign-off (see `docs/program-progress.md`). Nothing here
+should touch real money.
 
 ## Layout
 
