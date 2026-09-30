@@ -103,6 +103,7 @@ impl Env {
             let m = self.send_ok(&[ix], &keeper, &[]);
             cus.push(m.compute_units_consumed);
         }
+        self.warp(1); // DLMM JIT guard, see `Env::seed`
         cus
     }
 

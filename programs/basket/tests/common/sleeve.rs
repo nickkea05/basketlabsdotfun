@@ -199,6 +199,9 @@ impl Env {
         self.fund_components(l, plan);
         let ix = self.seed_ix(l, plan);
         let meta: TransactionMetadata = self.send_ok(&[ix], &l.payer, &[]);
+        // DLMM's JIT guard: a position cannot remove from the active bin in
+        // the same second it added there. Later transactions land later.
+        self.warp(1);
         let b: Basket = self.load(&l.basket);
         SeededBasket {
             tight: b.tight.key,
@@ -273,6 +276,7 @@ impl Env {
     ) -> MintResult {
         let ix = self.mint_ix(l, &buyer.pubkey(), deposits, min_shares_out, max_sleeve_lamports);
         let meta = self.send_ok(&[ix], buyer, &[]);
+        self.warp(1); // see `seed`
         MintResult { cu: meta.compute_units_consumed, logs: meta.logs }
     }
 
