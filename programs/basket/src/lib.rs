@@ -165,4 +165,52 @@ pub mod basket {
     ) -> Result<()> {
         handle_finalize_rebalance(ctx, entries)
     }
+
+    // ---- rewards (D15) ----
+
+    /// Keeper: commit an epoch's Merkle root, funded from the holder reserve
+    /// (`reward_mint` = share mint or native mint).
+    pub fn post_rewards_root(
+        ctx: Context<PostRewardsRoot>,
+        epoch: u64,
+        root: [u8; 32],
+        reward_mint: Pubkey,
+        total_amount: u64,
+        leaf_count: u32,
+    ) -> Result<()> {
+        handle_post_rewards_root(ctx, epoch, root, reward_mint, total_amount, leaf_count)
+    }
+
+    /// Anyone: pay one leaf to its wallet.
+    pub fn distribute_rewards(ctx: Context<DistributeRewards>, index: u32, amount: u64, proof: Vec<[u8; 32]>) -> Result<()> {
+        handle_distribute_rewards(ctx, index, amount, proof)
+    }
+
+    /// Keeper: retire a paid or stale root; the unpaid remainder returns to the reserve.
+    pub fn close_rewards_root(ctx: Context<CloseRewardsRoot>) -> Result<()> {
+        handle_close_rewards_root(ctx)
+    }
+
+    // ---- creator lock ----
+
+    pub fn lock_creator_shares(ctx: Context<LockCreatorShares>, amount: u64, duration_s: i64) -> Result<()> {
+        handle_lock_creator_shares(ctx, amount, duration_s)
+    }
+
+    pub fn unlock_creator_shares(ctx: Context<UnlockCreatorShares>) -> Result<()> {
+        handle_unlock_creator_shares(ctx)
+    }
+
+    // ---- close crank ----
+
+    /// Keeper: close positions of a closable basket (dust to treasury, rent
+    /// to payer). Remaining accounts: `[position, vault, mint, treasury_ata]`.
+    pub fn close_positions<'info>(ctx: Context<'info, ClosePositions<'info>>) -> Result<()> {
+        handle_close_positions(ctx)
+    }
+
+    /// Keeper: drain the sleeve, burn leftovers, close FeeVault + Basket.
+    pub fn close_basket(ctx: Context<CloseBasket>) -> Result<()> {
+        handle_close_basket(ctx)
+    }
 }

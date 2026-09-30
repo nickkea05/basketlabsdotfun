@@ -106,7 +106,7 @@ pub struct SweepFees<'info> {
 }
 
 /// Move lamports between two accounts this program may debit.
-fn move_lamports<'info>(from: &AccountInfo<'info>, to: &AccountInfo<'info>, amount: u64) -> Result<()> {
+pub fn move_lamports<'info>(from: &AccountInfo<'info>, to: &AccountInfo<'info>, amount: u64) -> Result<()> {
     if amount == 0 {
         return Ok(());
     }

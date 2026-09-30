@@ -74,9 +74,12 @@ pub struct FrozenClaim {
 pub struct RewardsRoot {
     pub bump: u8,
     pub basket: Pubkey,
+    /// Keeper who paid the rent; refunded when the root closes.
+    pub payer: Pubkey,
     pub epoch: u64,
     pub root: [u8; 32],
-    /// Reward mint: the share mint or the basket's flagship reward mint.
+    /// The share mint (rewards in shares) or the native mint (rewards in
+    /// SOL). Both are paid from the FeeVault's holder reserve.
     pub reward_mint: Pubkey,
     pub total_amount: u64,
     pub distributed_amount: u64,
@@ -87,7 +90,11 @@ pub struct RewardsRoot {
 
 impl RewardsRoot {
     pub fn space_for(leaf_count: u32) -> usize {
-        8 + 1 + 32 + 8 + 32 + 32 + 8 + 8 + 4 + 8 + 4 + leaf_count.div_ceil(8) as usize
+        8 + 1 + 32 + 32 + 8 + 32 + 32 + 8 + 8 + 4 + 8 + 4 + leaf_count.div_ceil(8) as usize
+    }
+
+    pub fn is_native(&self) -> bool {
+        self.reward_mint == anchor_spl::token::spl_token::native_mint::ID
     }
 
     pub fn is_claimed(&self, index: u32) -> bool {

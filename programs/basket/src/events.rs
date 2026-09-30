@@ -198,6 +198,14 @@ pub struct RewardDistributed {
 }
 
 #[event]
+pub struct RewardsRootClosed {
+    pub basket: Pubkey,
+    pub epoch: u64,
+    pub distributed_amount: u64,
+    pub returned_amount: u64,
+}
+
+#[event]
 pub struct CreatorSharesLocked {
     pub basket: Pubkey,
     pub creator: Pubkey,

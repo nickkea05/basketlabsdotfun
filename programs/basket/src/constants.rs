@@ -106,6 +106,20 @@ pub const DEFAULT_REBALANCE_WINDOW_S: i64 = 6 * 60 * 60;
 
 /// `close_basket`: zero supply and no activity for this long.
 pub const DEFAULT_CLOSE_IDLE_S: i64 = 14 * 24 * 60 * 60;
+/// Holder shares (base units, 1e-6 share) above the FeeVault's own stash
+/// that still count as "nobody holds anything" for the close crank; covers
+/// liquidity→amount rounding in the pool position.
+pub const CLOSE_DUST_SHARES: u64 = 10;
+
+/// D15: a rewards root the keeper may close (unpaid remainder back to the
+/// holder reserve) once it is this old.
+pub const REWARDS_ROOT_TTL_S: i64 = 30 * 24 * 60 * 60;
+/// Bitmap cap per root (8 KiB); split larger epochs across roots.
+pub const MAX_REWARD_LEAVES: u32 = 65_536;
+
+/// Creator lock duration bounds.
+pub const MIN_CREATOR_LOCK_S: i64 = 24 * 60 * 60;
+pub const MAX_CREATOR_LOCK_S: i64 = 4 * 365 * 24 * 60 * 60;
 
 /// D13 launch fee scheduler for Window/Closed baskets: starts at
 /// `cliff`, linear decay to the profile's pool fee over `periods × freq`.

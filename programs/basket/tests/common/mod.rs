@@ -10,11 +10,13 @@
 pub mod ed25519_stub;
 pub mod books;
 pub mod fees;
+pub mod lifecycle;
 pub mod managed;
 pub mod redeem;
 pub mod sleeve;
 
 pub use books::*;
+pub use lifecycle::*;
 pub use managed::*;
 pub use redeem::*;
 pub use sleeve::*;
