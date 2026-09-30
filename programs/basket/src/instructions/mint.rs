@@ -4,10 +4,11 @@
 //! (creation-unit rule; H = holder shares outstanding). The sleeve then
 //! mints `Y = X·r/(1−r)` treasury shares and takes `Y × price(active bin)`
 //! SOL from the buyer; `r` follows the step rule on the pool's SOL side.
-//! While the backstop is live and the active bin is inside it,
+//! While the backstop is live and the active bin is inside it and inside tight,
 //! `backstop_slice_bps` (20 %) of both legs is added to the backstop over
-//! the ~70 bins around the active bin (a flat add over all 280 would not fit
-//! a transaction) and the rest to the tight position; otherwise everything
+//! the `BACKSTOP_TOPUP_BINS` around the active bin, inside the bin arrays
+//! the tight add already carries (a flat add over all 280 bins would not
+//! fit a transaction), and the rest to the tight position; otherwise everything
 //! goes to tight. If the active bin has left the tight range (keeper late),
 //! only the leg that can be placed there is placed; the other waits idle for
 //! `recenter_tight`. The mint fee is withheld as shares into the FeeVault.
@@ -96,6 +97,12 @@ pub struct MintShares<'info> {
     pub system_program: Program<'info, System>,
 }
 
+/// Bins the per-mint backstop top-up spreads over, around the active bin.
+/// A DLMM add costs ≈ 7.5k CU per bin; with the tight add (63 bins) and
+/// the rest of `mint` this keeps the worst case (active bin outside tight,
+/// N = 8) near 1.1M CU of the 1.4M budget.
+pub const BACKSTOP_TOPUP_BINS: i32 = 35;
+
 /// Where a mint's sleeve goes: `(x, y, lower, upper)` for the backstop add
 /// (zero when not applicable) and for the tight add, with legs the tight
 /// range cannot hold left out (they stay idle).
@@ -107,14 +114,17 @@ pub struct SleevePlan {
 pub fn plan_sleeve(basket: &Basket, view: &PoolView, slice_bps: u16, x: u64, y: u64) -> Result<SleevePlan> {
     let active = view.active_id;
     let mut plan = SleevePlan { backstop: (0, 0, 0, 0), tight: (x, y) };
-    if basket.backstop_live() && basket.backstop.contains(active) && view.backstop.is_some() {
+    // Only while the active bin is inside tight: a one-sided tight add
+    // (keeper late) is dearer, and both adds together would leave the mint
+    // no CU headroom; the leg tight cannot hold waits for `recenter_tight`.
+    if basket.backstop_live() && basket.backstop.contains(active) && basket.tight.contains(active) && view.backstop.is_some() {
         // Stay inside the bin arrays the tight add already carries: the
         // widest basket has no account locks left for extra arrays.
         let (t_lo, t_hi) = dlmm::bin_array_range(basket.tight.lower_bin_id, basket.tight.upper_bin_id);
         let floor = dlmm::array_lower_bin(t_lo).max(basket.backstop.lower_bin_id);
         let ceiling = dlmm::array_upper_bin(t_hi).min(basket.backstop.upper_bin_id);
-        let lower = (active - dlmm::DEFAULT_BIN_PER_POSITION / 2).max(floor);
-        let upper = (lower + dlmm::DEFAULT_BIN_PER_POSITION - 1).min(ceiling);
+        let lower = (active - BACKSTOP_TOPUP_BINS / 2).max(floor);
+        let upper = (lower + BACKSTOP_TOPUP_BINS - 1).min(ceiling);
         let (x_bins, y_bins) = if lower <= upper { side_bins(lower, upper, active) } else { (0, 0) };
         let bx = if x_bins > 0 { math::bps(x, slice_bps)? } else { 0 };
         let by = if y_bins > 0 { math::bps(y, slice_bps)? } else { 0 };

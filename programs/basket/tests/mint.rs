@@ -179,7 +179,7 @@ fn mint_funds_the_backstop_once_it_is_live() {
     assert_eq!(q.backstop_y, q.sleeve_lamports * slice as u64 / BPS_TOTAL as u64);
     let m = env.mint(&l, &buyer, &deposits, 0, q.sleeve_lamports);
     eprintln!("mint with backstop add CU: {}", m.cu);
-    assert!(m.cu < 1_400_000, "mint CU {}", m.cu);
+    assert!(m.cu < 1_200_000, "mint CU {} (want ≥ 200k headroom under 1.4M)", m.cu);
 
     let backstop = env.backstop_amounts(&l);
     let tight = env.tight_amounts(&l);
@@ -351,7 +351,16 @@ fn mint_account_counts_and_cu_by_size() {
             if *n == 8 {
                 let m = r.expect("mint N=8 with live backstop");
                 eprintln!("mint N={n} + backstop add: {accounts} accounts, {} CU", m.compute_units_consumed);
-                assert!(m.compute_units_consumed < 1_400_000, "mint CU {}", m.compute_units_consumed);
+                assert!(m.compute_units_consumed < 1_200_000, "mint CU {}", m.compute_units_consumed);
+                // Worst case: keeper late, active bin below tight but inside the
+                // backstop (one-sided tight add plus the backstop top-up).
+                env.warp(1);
+                let b = l.basket_state(&env);
+                env.sell_down_to(&l, &l.payer, b.tight.lower_bin_id - 5);
+                env.fund_components_for(&buyer.pubkey(), &l, &deposits);
+                let m = env.mint(&l, &buyer, &deposits, 0, u64::MAX);
+                eprintln!("mint N={n} + backstop add, active outside tight: {} CU", m.cu);
+                assert!(m.cu < 1_200_000, "mint CU {}", m.cu);
             } else {
                 let e = r.err().expect("N=9 with live backstop exceeds 64 locks");
                 assert!(format!("{:?}", e.err).contains("TooManyAccountLocks"), "{:?}", e.err);

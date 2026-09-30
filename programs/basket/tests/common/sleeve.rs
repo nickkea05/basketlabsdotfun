@@ -355,10 +355,15 @@ impl Env {
         let sleeve_lamports = dlmm::lamports_for_x(y, l.pool.price_q64(active)).unwrap();
         let config = self.config();
         let (mut backstop_x, mut backstop_y) = (0, 0);
-        if b.backstop_live() && b.backstop.contains(active) {
-            let lower = (active - dlmm::DEFAULT_BIN_PER_POSITION / 2).max(b.backstop.lower_bin_id);
-            let upper = (lower + dlmm::DEFAULT_BIN_PER_POSITION - 1).min(b.backstop.upper_bin_id);
-            let (xb, yb) = basket::instructions::sleeve::side_bins(lower, upper, active);
+        if b.backstop_live() && b.backstop.contains(active) && b.tight.contains(active) {
+            // Mirrors `plan_sleeve`: the top-up stays inside tight's bin arrays.
+            let (t_lo, t_hi) = dlmm::bin_array_range(b.tight.lower_bin_id, b.tight.upper_bin_id);
+            let floor = dlmm::array_lower_bin(t_lo).max(b.backstop.lower_bin_id);
+            let ceiling = dlmm::array_upper_bin(t_hi).min(b.backstop.upper_bin_id);
+            let topup = basket::instructions::mint::BACKSTOP_TOPUP_BINS;
+            let lower = (active - topup / 2).max(floor);
+            let upper = (lower + topup - 1).min(ceiling);
+            let (xb, yb) = if lower <= upper { basket::instructions::sleeve::side_bins(lower, upper, active) } else { (0, 0) };
             if xb > 0 {
                 backstop_x = math::bps(y, config.pools.backstop_slice_bps).unwrap();
             }

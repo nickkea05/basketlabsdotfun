@@ -78,7 +78,7 @@ fn seeds_places_tight_and_mints_shares() {
     assert_eq!((b.tight.lower_bin_id, b.tight.upper_bin_id), (s.tight_lower, s.tight_upper));
     assert!(!b.backstop.is_set());
     assert_eq!(b.backstop_state, BACKSTOP_UNPLACED);
-    assert_eq!(b.last_recenter_ts, env.now());
+    assert_eq!(b.last_recenter_ts, env.now() - 1, "interval counts from the seed (harness steps the clock 1 s after)");
     let opening_value = math::implied_total_lamports(plan.sleeve_lamports, DEFAULT_STEP_R_BPS).unwrap();
     assert_eq!(b.hwm_nav_lamports, math::nav_per_share(opening_value, x).unwrap());
     let fv = env.fee_vault(&l);

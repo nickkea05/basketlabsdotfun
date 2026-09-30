@@ -485,11 +485,13 @@ pub fn handle_recenter_tight<'info>(mut ctx: Context<'info, KeeperPool<'info>>) 
     let (array_rent, _) = c.dl.ensure_bin_arrays(ctx.remaining_accounts, &c.keeper, lo_idx, hi_idx)?;
     c.dl.init_position(&c.signer, &a.new_position.to_account_info(), false, &c.basket_ai, &c.keeper, &a.rent.to_account_info(), lower, upper - lower + 1)?;
 
-    // 3. What goes back in: the removed amounts, plus all idle unless the
-    //    backstop is still being funded from it. While the gate is open,
-    //    top the ask side up so bids and asks are balanced at the new price.
-    let funding = basket.backstop_state == BACKSTOP_FUNDING;
-    let (mut amount_x, amount_y) = if funding {
+    // 3. What goes back in: the removed amounts, plus all idle — unless the
+    //    idle is the backstop's (its slice waits there until it is placed
+    //    and funded; a withdrawn backstop's SOL waits for the re-placement).
+    //    While the gate is open, top the ask side up so bids and asks are
+    //    balanced at the new price.
+    let idle_is_backstops = basket.backstop_state != BACKSTOP_LIVE;
+    let (mut amount_x, amount_y) = if idle_is_backstops {
         (removed_x, removed_y)
     } else {
         (read_token_amount(c.dl.basket_share_ata)?, read_token_amount(c.dl.basket_wsol_ata)?)

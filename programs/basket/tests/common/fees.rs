@@ -143,6 +143,31 @@ impl Env {
         }
     }
 
+    /// Sell into the basket's own bids until the active bin is `target` or
+    /// below (no outside liquidity: `target` must be inside the range).
+    pub fn sell_down_to(&mut self, l: &Launched, seller: &Keypair, target: i32) {
+        let seller_ata = Env::ata(&seller.pubkey(), &l.share_mint);
+        let mut rounds = 0;
+        while l.pool.active_id(self) > target {
+            let have = self.token_amount(&seller_ata);
+            assert!(have > 0, "seller ran out of shares at bin {}", l.pool.active_id(self));
+            self.sell_shares(l, seller, have.min(5_000_000));
+            rounds += 1;
+            assert!(rounds < 2_000, "stuck at bin {}", l.pool.active_id(self));
+        }
+    }
+
+    /// Buy through the basket's own asks until the active bin is `target` or
+    /// above (no outside liquidity: `target` must be inside the range).
+    pub fn buy_up_to(&mut self, l: &Launched, buyer: &Keypair, target: i32) {
+        let mut rounds = 0;
+        while l.pool.active_id(self) < target {
+            self.buy_shares(l, buyer, 5_000_000);
+            rounds += 1;
+            assert!(rounds < 2_000, "stuck at bin {}", l.pool.active_id(self));
+        }
+    }
+
     pub fn claim_pool_fees_ix(&self, l: &Launched, caller: &Pubkey, position: &Pubkey, min_bin_id: i32, max_bin_id: i32) -> Instruction {
         let fee_vault = fee_vault_pda(&l.share_mint);
         let config = self.config();
