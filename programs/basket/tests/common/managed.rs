@@ -24,7 +24,7 @@ pub struct CrystallizeQuote {
 }
 
 impl Env {
-    /// Managed basket: sleeve 12% (band 8–20%), open gate, given perf fee.
+    /// Managed basket: sleeve 12% (band 8–20%), given perf fee.
     pub fn launch_managed(&mut self, n: usize, nonce: u64, perf_fee_bps: u16) -> Launched {
         self.launch_with(n, nonce, |a| {
             a.basket_type = BASKET_TYPE_MANAGED;
@@ -36,9 +36,9 @@ impl Env {
         })
     }
 
-    pub fn crystallize_ix(&self, l: &Launched, s: &SeededBasket, keeper: &Pubkey, nav: u64) -> Instruction {
+    pub fn crystallize_ix(&self, l: &Launched, keeper: &Pubkey, nav: u64) -> Instruction {
         let creator = l.creator.pubkey();
-        let accounts = basket::accounts::Crystallize {
+        let mut accounts = basket::accounts::Crystallize {
             keeper: *keeper,
             config: config_pda(),
             basket: l.basket,
@@ -46,13 +46,16 @@ impl Env {
             share_auth: share_auth_pda(&l.share_mint),
             creator,
             creator_share_ata: Env::ata(&creator, &l.share_mint),
-            pool: s.pool,
-            pool_position: basket::damm::position(&s.position_nft_mint),
+            basket_share_ata: Env::ata(&l.basket, &l.share_mint),
+            lb_pair: l.pool.lb_pair,
+            tight_position: l.tight_position(self),
+            backstop_position: self.backstop_or_placeholder(l),
             token_program: spl_token::ID,
             associated_token_program: anchor_spl::associated_token::ID,
             system_program: anchor_lang::system_program::ID,
         }
         .to_account_metas(None);
+        accounts.extend(self.pool_tail(l));
         Instruction {
             program_id: basket::id(),
             accounts,
@@ -60,22 +63,22 @@ impl Env {
         }
     }
 
-    pub fn crystallize(&mut self, l: &Launched, s: &SeededBasket, nav: u64) -> TransactionMetadata {
+    pub fn crystallize(&mut self, l: &Launched, nav: u64) -> TransactionMetadata {
         let keeper = self.keeper.insecure_clone();
-        let ix = self.crystallize_ix(l, s, &keeper.pubkey(), nav);
+        let ix = self.crystallize_ix(l, &keeper.pubkey(), nav);
         self.send_ok(&[ix], &keeper, &[])
     }
 
-    pub fn crystallize_expect_err(&mut self, l: &Launched, s: &SeededBasket, nav: u64, code: u32) {
+    pub fn crystallize_expect_err(&mut self, l: &Launched, nav: u64, code: u32) {
         let keeper = self.keeper.insecure_clone();
-        let ix = self.crystallize_ix(l, s, &keeper.pubkey(), nav);
+        let ix = self.crystallize_ix(l, &keeper.pubkey(), nav);
         self.send_expect_err(&[ix], &keeper, &[], code);
     }
 
     /// Mirror of the program's crystallize arithmetic at the current clock.
-    pub fn crystallize_quote(&self, l: &Launched, s: &SeededBasket, nav: u64) -> CrystallizeQuote {
+    pub fn crystallize_quote(&self, l: &Launched, nav: u64) -> CrystallizeQuote {
         let b: Basket = self.load(&l.basket);
-        let h = self.holder_shares(l, s);
+        let h = self.holder_shares(l);
         let elapsed = self.now() - b.last_mgmt_accrual_ts;
         let mgmt = math::mgmt_fee_shares(h, b.fees.mgmt_fee_bps_per_year, elapsed).unwrap();
         let h1 = h + mgmt;

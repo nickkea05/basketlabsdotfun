@@ -86,8 +86,10 @@ pub struct CreateBasket<'info> {
     /// CHECK: the deployer's share ATA (created here; DLMM wants it to exist).
     #[account(mut)]
     pub payer_share_ata: UncheckedAccount<'info>,
-    /// The deployer's wSOL ATA (must exist; DLMM reads it).
+    /// The deployer's wSOL ATA (must exist; DLMM reads it and wants a
+    /// non-zero balance, topped up here if empty).
     #[account(
+        mut,
         token::mint = wsol_mint,
         token::authority = payer,
         token::token_program = token_program,
@@ -341,6 +343,38 @@ pub fn handle_create_basket<'info>(
     )?;
     let (base_factor, base_fee_power_factor) = dlmm::base_factor_for_fee_bps(preset.bin_step, preset.base_fee_bps as u64)
         .ok_or_else(|| error!(BasketError::InvalidArgument))?;
+    // DLMM's customizable pair wants the funder to hold some of both tokens
+    // as proof they launched it. Mint one base unit of shares to the deployer
+    // for the duration of the CPI and burn it right after (supply goes back
+    // to 0); make sure the deployer's wSOL ATA holds at least one lamport.
+    if ctx.accounts.payer_wsol_ata.amount == 0 {
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.key(),
+                system_program::Transfer {
+                    from: ctx.accounts.payer.to_account_info(),
+                    to: ctx.accounts.payer_wsol_ata.to_account_info(),
+                },
+            ),
+            1,
+        )?;
+        token::sync_native(CpiContext::new(
+            ctx.accounts.token_program.key(),
+            token::SyncNative { account: ctx.accounts.payer_wsol_ata.to_account_info() },
+        ))?;
+    }
+    token::mint_to(
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.key(),
+            token::MintTo {
+                mint: ctx.accounts.share_mint.to_account_info(),
+                to: ctx.accounts.payer_share_ata.to_account_info(),
+                authority: ctx.accounts.share_auth.to_account_info(),
+            },
+            &[share_auth_seeds],
+        ),
+        1,
+    )?;
     // X = shares (asks), Y = wSOL (bids); the pool PDA sorts the mints, the
     // instruction takes X/Y as given (verified in the §6.1b spike).
     let payer_before = ctx.accounts.payer.lamports();
@@ -382,6 +416,17 @@ pub fn handle_create_basket<'info>(
         },
     )?;
     let pool_rent = payer_before.saturating_sub(ctx.accounts.payer.lamports());
+    token::burn(
+        CpiContext::new(
+            ctx.accounts.token_program.key(),
+            token::Burn {
+                mint: ctx.accounts.share_mint.to_account_info(),
+                from: ctx.accounts.payer_share_ata.to_account_info(),
+                authority: ctx.accounts.payer.to_account_info(),
+            },
+        ),
+        1,
+    )?;
 
     // First chunk of the book.
     let programs = PositionPrograms {

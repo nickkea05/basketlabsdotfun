@@ -9,7 +9,7 @@ use common::*;
 #[test]
 fn programs_load_into_svm() {
     let env = Env::new();
-    for id in [basket::id(), METAPLEX_ID, CP_AMM_ID] {
+    for id in [basket::id(), METAPLEX_ID, LB_CLMM_ID] {
         let account = env.svm.get_account(&id).expect("program account exists");
         assert!(account.executable, "{id} not executable");
     }

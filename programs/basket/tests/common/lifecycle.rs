@@ -1,5 +1,5 @@
 //! Harness for the Phase 7 instructions: the creator lock and the close crank
-//! (`close_positions` + `close_basket`).
+//! (`close_positions` + `close_basket` + `close_fee_vault`).
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -8,7 +8,7 @@ use anchor_spl::token::spl_token;
 use solana_signer::Signer;
 
 use basket::constants::*;
-use basket::damm;
+use basket::dlmm;
 use basket::state::*;
 
 use super::*;
@@ -62,17 +62,18 @@ impl Env {
 
     /// Close the positions for `mints` (dust to the treasury, rent to the
     /// basket's payer). Chunk as needed.
-    pub fn close_positions_ix(&self, l: &Launched, s: Option<&SeededBasket>, keeper: &Pubkey, mints: &[Pubkey]) -> Instruction {
+    pub fn close_positions_ix(&self, l: &Launched, keeper: &Pubkey, mints: &[Pubkey]) -> Instruction {
         let treasury = self.treasury.pubkey();
-        let fee_vault = fee_vault_pda(&l.share_mint);
+        let b: Basket = self.load(&l.basket);
+        let tight = if b.tight.is_set() { b.tight.key } else { l.placeholder() };
         let mut accounts = basket::accounts::ClosePositions {
             keeper: *keeper,
             config: config_pda(),
             basket: l.basket,
             share_mint: l.share_mint,
-            fee_vault_share_ata: Env::ata(&fee_vault, &l.share_mint),
-            pool: s.map(|s| s.pool),
-            pool_position: s.map(|s| damm::position(&s.position_nft_mint)),
+            basket_share_ata: Env::ata(&l.basket, &l.share_mint),
+            lb_pair: l.pool.lb_pair,
+            tight_position: tight,
             pending_book: pending_book_pda(&l.share_mint),
             treasury,
             payer: l.payer.pubkey(),
@@ -88,20 +89,27 @@ impl Env {
             accounts.push(AccountMeta::new_readonly(*m, false));
             accounts.push(AccountMeta::new(Env::ata(&treasury, m), false));
         }
-        Instruction { program_id: basket::id(), accounts, data: basket::instruction::ClosePositions {}.data() }
+        accounts.extend(self.pool_tail(l));
+        Instruction {
+            program_id: basket::id(),
+            accounts,
+            data: basket::instruction::ClosePositions { count: mints.len() as u16 }.data(),
+        }
     }
 
-    /// Final step: drain the sleeve to the treasury, burn what is left,
-    /// close FeeVault + Basket. `s = None` for a basket that was never seeded.
-    pub fn close_basket_ix(&self, l: &Launched, s: Option<&SeededBasket>, keeper: &Pubkey) -> Instruction {
+    /// Final step: drain the tight position to the treasury, burn what is
+    /// left, refund the deposit, close the Basket.
+    pub fn close_basket_ix(&self, l: &Launched, keeper: &Pubkey) -> Instruction {
         let treasury = self.treasury.pubkey();
         let fee_vault = fee_vault_pda(&l.share_mint);
-        let accounts = basket::accounts::CloseBasket {
+        let b: Basket = self.load(&l.basket);
+        let tight = if b.tight.is_set() { b.tight.key } else { l.placeholder() };
+        let mut accounts = basket::accounts::CloseBasket {
             keeper: *keeper,
             config: config_pda(),
             basket: l.basket,
             share_mint: l.share_mint,
-            fee_vault: s.map(|_| fee_vault),
+            fee_vault: if b.seeded { Some(fee_vault) } else { None },
             fee_vault_share_ata: Env::ata(&fee_vault, &l.share_mint),
             creator: l.creator.pubkey(),
             treasury,
@@ -110,21 +118,43 @@ impl Env {
             pending_book: pending_book_pda(&l.share_mint),
             wsol_mint: WSOL,
             basket_share_ata: Env::ata(&l.basket, &l.share_mint),
-            position_nft_mint: s.map(|s| s.position_nft_mint),
-            position_nft_account: s.map(|s| damm::position_nft_account(&s.position_nft_mint)),
-            pool_authority: damm::pool_authority(),
-            pool: s.map(|s| s.pool),
-            pool_position: s.map(|s| damm::position(&s.position_nft_mint)),
-            token_a_vault: s.map(|s| damm::token_vault(&l.share_mint, &s.pool)),
-            token_b_vault: s.map(|s| damm::token_vault(&WSOL, &s.pool)),
-            cp_amm_program: CP_AMM_ID,
-            event_authority: damm::event_authority(),
+            basket_wsol_ata: Env::ata(&l.basket, &WSOL),
+            lb_pair: l.pool.lb_pair,
+            reserve_x: l.pool.reserve_x,
+            reserve_y: l.pool.reserve_y,
+            tight_position: tight,
+            dlmm_event_authority: dlmm::event_authority(),
+            dlmm_program: LB_CLMM_ID,
+            memo_program: MEMO_ID,
             token_program: spl_token::ID,
             token_2022_program: anchor_spl::token_2022::ID,
             associated_token_program: anchor_spl::associated_token::ID,
             system_program: anchor_lang::system_program::ID,
         }
         .to_account_metas(None);
+        // Anchor renders `None` optional accounts as the program id, which
+        // must not be marked writable.
+        for m in accounts.iter_mut() {
+            if m.pubkey == basket::id() {
+                m.is_writable = false;
+            }
+        }
+        accounts.extend(self.pool_tail(l));
         Instruction { program_id: basket::id(), accounts, data: basket::instruction::CloseBasket {}.data() }
+    }
+
+    pub fn close_fee_vault_ix(&self, l: &Launched, keeper: &Pubkey) -> Instruction {
+        let fee_vault = fee_vault_pda(&l.share_mint);
+        let accounts = basket::accounts::CloseFeeVault {
+            keeper: *keeper,
+            config: config_pda(),
+            share_mint: l.share_mint,
+            fee_vault,
+            basket: l.basket,
+            fee_vault_share_ata: Env::ata(&fee_vault, &l.share_mint),
+            payer: l.payer.pubkey(),
+        }
+        .to_account_metas(None);
+        Instruction { program_id: basket::id(), accounts, data: basket::instruction::CloseFeeVault {}.data() }
     }
 }

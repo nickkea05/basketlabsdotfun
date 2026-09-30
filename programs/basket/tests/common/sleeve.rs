@@ -1,4 +1,4 @@
-//! Harness helpers for `seed` / `mint` / the DAMM v2 sleeve: instruction
+//! Harness helpers for `seed` / `mint` / the DLMM sleeve: instruction
 //! builders, pool/position readers and an off-chain mirror of the program's
 //! share quote (what the frontend will compute before building a buy).
 
@@ -10,74 +10,47 @@ use litesvm::types::TransactionMetadata;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 
-use basket::damm::{self, cp_amm};
+use basket::constants::*;
+use basket::dlmm;
 use basket::math;
 use basket::state::*;
 
 use super::*;
 
 /// What the first buyer brings to `seed`.
+#[derive(Clone, Debug)]
 pub struct SeedPlan {
     pub deposits: Vec<u64>,
     pub initial_shares: u64,
     pub sleeve_lamports: u64,
-    pub position_nft_mint: Keypair,
-}
-
-impl Clone for SeedPlan {
-    fn clone(&self) -> Self {
-        SeedPlan {
-            deposits: self.deposits.clone(),
-            initial_shares: self.initial_shares,
-            sleeve_lamports: self.sleeve_lamports,
-            position_nft_mint: Keypair::new(),
-        }
-    }
 }
 
 impl SeedPlan {
-    /// 1_000 units (6 dp) of every component, 1_000 shares, 0.3 SOL sleeve:
-    /// at r = 25% that implies 1.2 SOL of value, above the 1 SOL minimum.
+    /// 1_000 units (6 dp) of every component, 1_000 shares, and the SOL leg
+    /// the launch bin implies: Y = X·r/(1−r) treasury shares at 1 lamport
+    /// per base unit → 0.333 SOL. At r = 25 % that implies 1.33 SOL of
+    /// value, above the 1 SOL minimum.
     pub fn default_for(l: &Launched) -> Self {
+        let initial_shares = 1_000_000_000;
+        let y = math::treasury_shares(initial_shares, DEFAULT_STEP_R_BPS).unwrap();
+        let price = dlmm::bin_price_q64(l.args.launch_active_id, l.pool.bin_step).unwrap();
         SeedPlan {
             deposits: vec![1_000_000_000; l.book.len()],
-            initial_shares: 1_000_000_000,
-            sleeve_lamports: 300_000_000,
-            position_nft_mint: Keypair::new(),
+            initial_shares,
+            sleeve_lamports: dlmm::lamports_for_x(y, price).unwrap(),
         }
     }
 
-    /// Mirror of the program's seed geometry for a profile.
-    pub fn quote(&self, r_bps: u16, range: PriceRange) -> SeedQuote {
-        let nominal = math::treasury_shares(self.initial_shares, r_bps).unwrap();
-        let sqrt_price = math::sqrt_price_from_amounts(self.sleeve_lamports, nominal).unwrap();
-        let (lo, hi) = math::sqrt_price_bounds(sqrt_price, range).unwrap();
-        let q = math::sleeve_quote(self.sleeve_lamports, nominal, lo, sqrt_price, hi).unwrap();
-        SeedQuote {
-            nominal_treasury_shares: nominal,
-            treasury_shares: q.amount_a,
-            sleeve_lamports: q.amount_b,
-            sqrt_price,
-            sqrt_min: lo,
-            sqrt_max: hi,
-            liquidity: q.liquidity,
-        }
+    pub fn treasury_shares(&self) -> u64 {
+        math::treasury_shares(self.initial_shares, DEFAULT_STEP_R_BPS).unwrap()
     }
 }
 
-pub struct SeedQuote {
-    pub nominal_treasury_shares: u64,
-    pub treasury_shares: u64,
-    pub sleeve_lamports: u64,
-    pub sqrt_price: u128,
-    pub sqrt_min: u128,
-    pub sqrt_max: u128,
-    pub liquidity: u128,
-}
-
+/// The basket right after `seed`.
 pub struct SeededBasket {
-    pub pool: Pubkey,
-    pub position_nft_mint: Pubkey,
+    pub tight: Pubkey,
+    pub tight_lower: i32,
+    pub tight_upper: i32,
     pub cu: u64,
 }
 
@@ -90,39 +63,11 @@ pub struct MintResult {
 pub struct MintQuote {
     pub gross_shares: u64,
     pub r_bps: u16,
-    /// `X·r/(1−r)`: what the SOL leg is priced from.
-    pub nominal_treasury_shares: u64,
-    /// Shares the pool actually takes for that SOL leg (range geometry).
     pub treasury_shares: u64,
     pub sleeve_lamports: u64,
-    pub liquidity: u128,
-}
-
-pub struct PoolState {
-    pub token_a_mint: Pubkey,
-    pub token_b_mint: Pubkey,
-    pub token_a_vault: Pubkey,
-    pub token_b_vault: Pubkey,
-    pub sqrt_price: u128,
-    pub sqrt_min_price: u128,
-    pub sqrt_max_price: u128,
-    pub liquidity: u128,
-    pub token_a_amount: u64,
-    pub token_b_amount: u64,
-    pub collect_fee_mode: u8,
-    pub base_fee_cliff_numerator: u64,
-    pub base_fee_periods: u16,
-    pub base_fee_period_frequency: u64,
-    pub base_fee_reduction_factor: u64,
-}
-
-pub struct PositionState {
-    pub pool: Pubkey,
-    pub unlocked_liquidity: u128,
-}
-
-pub fn pool_pda(share_mint: &Pubkey) -> Pubkey {
-    damm::customizable_pool(share_mint, &WSOL)
+    /// The backstop slice, when the backstop is live and in range.
+    pub backstop_x: u64,
+    pub backstop_y: u64,
 }
 
 /// `[position, vault, owner_ata, mint]` per book entry.
@@ -138,38 +83,6 @@ pub fn component_metas(basket_key: &Pubkey, share_mint: &Pubkey, owner: &Pubkey,
 }
 
 impl Env {
-    pub fn pool_state(&self, pool: &Pubkey) -> PoolState {
-        let acc = self.account(pool).expect("pool missing");
-        assert_eq!(acc.owner, CP_AMM_ID);
-        let p: cp_amm::accounts::Pool =
-            bytemuck::pod_read_unaligned(&acc.data[8..8 + std::mem::size_of::<cp_amm::accounts::Pool>()]);
-        let d = &p.pool_fees.base_fee.base_fee_info.data;
-        PoolState {
-            token_a_mint: p.token_a_mint,
-            token_b_mint: p.token_b_mint,
-            token_a_vault: p.token_a_vault,
-            token_b_vault: p.token_b_vault,
-            sqrt_price: p.sqrt_price,
-            sqrt_min_price: p.sqrt_min_price,
-            sqrt_max_price: p.sqrt_max_price,
-            liquidity: p.liquidity,
-            token_a_amount: p.token_a_amount,
-            token_b_amount: p.token_b_amount,
-            collect_fee_mode: p.collect_fee_mode,
-            base_fee_cliff_numerator: u64::from_le_bytes(d[0..8].try_into().unwrap()),
-            base_fee_periods: u16::from_le_bytes(d[14..16].try_into().unwrap()),
-            base_fee_period_frequency: u64::from_le_bytes(d[16..24].try_into().unwrap()),
-            base_fee_reduction_factor: u64::from_le_bytes(d[24..32].try_into().unwrap()),
-        }
-    }
-
-    pub fn position_state(&self, position: &Pubkey) -> PositionState {
-        let acc = self.account(position).expect("position missing");
-        let p: cp_amm::accounts::Position =
-            bytemuck::pod_read_unaligned(&acc.data[8..8 + std::mem::size_of::<cp_amm::accounts::Position>()]);
-        PositionState { pool: p.pool, unlocked_liquidity: p.unlocked_liquidity }
-    }
-
     /// Mint `deposits[i]` of component `i` into `owner`'s ATA.
     pub fn fund_components_for(&mut self, owner: &Pubkey, l: &Launched, deposits: &[u64]) {
         for (mint, amount) in l.mints.iter().zip(deposits) {
@@ -182,15 +95,55 @@ impl Env {
         self.fund_components_for(&payer, l, &plan.deposits);
     }
 
+    /// The tight range `seed` will open: `[active − w, active + w]`.
+    pub fn tight_range_at(&self, l: &Launched, active_id: i32) -> (i32, i32) {
+        let b: Basket = self.load(&l.basket);
+        let w = b.pool.preset.tight_half_width_bins as i32;
+        (active_id - w, active_id + w)
+    }
+
+    /// Bin arrays (existing or not) covering `[lower, upper]`.
+    pub fn bin_array_metas(&self, l: &Launched, lower: i32, upper: i32) -> Vec<AccountMeta> {
+        l.pool.bin_array_metas(lower, upper)
+    }
+
+    /// Bin arrays of both positions the basket holds (the tail every sleeve
+    /// instruction wants): tight, plus backstop while it holds liquidity.
+    pub fn pool_tail(&self, l: &Launched) -> Vec<AccountMeta> {
+        let b: Basket = self.load(&l.basket);
+        let mut metas: Vec<AccountMeta> = Vec::new();
+        let mut push_range = |lower: i32, upper: i32| {
+            for m in self.existing_bin_array_metas(&l.pool, lower, upper) {
+                if !metas.iter().any(|x| x.pubkey == m.pubkey) {
+                    metas.push(m);
+                }
+            }
+        };
+        if b.tight.is_set() {
+            push_range(b.tight.lower_bin_id, b.tight.upper_bin_id);
+        }
+        if b.backstop.is_set() {
+            push_range(b.backstop.lower_bin_id, b.backstop.upper_bin_id);
+        }
+        metas
+    }
+
+    /// `backstop_position` account for the sleeve instructions.
+    pub fn backstop_or_placeholder(&self, l: &Launched) -> Pubkey {
+        let b: Basket = self.load(&l.basket);
+        if b.backstop.is_set() { b.backstop.key } else { l.placeholder() }
+    }
+
     pub fn seed_ix(&self, l: &Launched, plan: &SeedPlan) -> Instruction {
         self.seed_ix_for(l, plan, &l.book)
     }
 
     pub fn seed_ix_for(&self, l: &Launched, plan: &SeedPlan, chunk: &[PositionArg]) -> Instruction {
         let payer = l.payer.pubkey();
-        let nft = plan.position_nft_mint.pubkey();
-        let pool = pool_pda(&l.share_mint);
         let fee_vault = fee_vault_pda(&l.share_mint);
+        let active = l.pool.active_id(self);
+        let (lower, upper) = self.tight_range_at(l, active);
+        let tight = dlmm::position_pda(&l.pool.lb_pair, &l.basket, lower, upper - lower + 1);
         let mut accounts = basket::accounts::Seed {
             payer,
             config: config_pda(),
@@ -198,29 +151,28 @@ impl Env {
             share_mint: l.share_mint,
             share_auth: share_auth_pda(&l.share_mint),
             payer_share_ata: Env::ata(&payer, &l.share_mint),
-            payer_wsol_ata: Env::ata(&payer, &WSOL),
             fee_vault,
             fee_vault_share_ata: Env::ata(&fee_vault, &l.share_mint),
             treasury: self.treasury.pubkey(),
             wsol_mint: WSOL,
             basket_share_ata: Env::ata(&l.basket, &l.share_mint),
             basket_wsol_ata: Env::ata(&l.basket, &WSOL),
-            position_nft_mint: nft,
-            position_nft_account: damm::position_nft_account(&nft),
-            pool_authority: damm::pool_authority(),
-            pool,
-            pool_position: damm::position(&nft),
-            token_a_vault: damm::token_vault(&l.share_mint, &pool),
-            token_b_vault: damm::token_vault(&WSOL, &pool),
-            cp_amm_program: CP_AMM_ID,
-            event_authority: damm::event_authority(),
+            lb_pair: l.pool.lb_pair,
+            reserve_x: l.pool.reserve_x,
+            reserve_y: l.pool.reserve_y,
+            tight_position: tight,
+            dlmm_event_authority: dlmm::event_authority(),
+            dlmm_program: LB_CLMM_ID,
+            memo_program: MEMO_ID,
             token_program: spl_token::ID,
             token_2022_program: anchor_spl::token_2022::ID,
             associated_token_program: anchor_spl::associated_token::ID,
             system_program: anchor_lang::system_program::ID,
+            rent: solana_sdk_ids::sysvar::rent::ID,
         }
         .to_account_metas(None);
         accounts.extend(component_metas(&l.basket, &l.share_mint, &payer, chunk));
+        accounts.extend(self.bin_array_metas(l, lower, upper));
         Instruction {
             program_id: basket::id(),
             accounts,
@@ -239,25 +191,34 @@ impl Env {
     pub fn seed_expect_err(&mut self, l: &Launched, plan: &SeedPlan, code: u32) {
         self.fund_components(l, plan);
         let ix = self.seed_ix(l, plan);
-        self.send_expect_err(&[ix], &l.payer, &[&plan.position_nft_mint], code);
+        self.send_expect_err(&[ix], &l.payer, &[], code);
     }
 
     /// Funds the components and seeds; panics on failure.
     pub fn seed(&mut self, l: &Launched, plan: &SeedPlan) -> SeededBasket {
         self.fund_components(l, plan);
         let ix = self.seed_ix(l, plan);
-        let meta: TransactionMetadata = self.send_ok(&[ix], &l.payer, &[&plan.position_nft_mint]);
+        let meta: TransactionMetadata = self.send_ok(&[ix], &l.payer, &[]);
+        let b: Basket = self.load(&l.basket);
         SeededBasket {
-            pool: pool_pda(&l.share_mint),
-            position_nft_mint: plan.position_nft_mint.pubkey(),
+            tight: b.tight.key,
+            tight_lower: b.tight.lower_bin_id,
+            tight_upper: b.tight.upper_bin_id,
             cu: meta.compute_units_consumed,
         }
+    }
+
+    /// Launch + seed with defaults.
+    pub fn launch_and_seed(&mut self, n: usize, nonce: u64) -> (Launched, SeededBasket) {
+        let l = self.launch_fixed(n, nonce);
+        let plan = SeedPlan::default_for(&l);
+        let s = self.seed(&l, &plan);
+        (l, s)
     }
 
     pub fn mint_ix(
         &self,
         l: &Launched,
-        s: &SeededBasket,
         buyer: &Pubkey,
         deposits: &[u64],
         min_shares_out: u64,
@@ -276,13 +237,14 @@ impl Env {
             wsol_mint: WSOL,
             basket_share_ata: Env::ata(&l.basket, &l.share_mint),
             basket_wsol_ata: Env::ata(&l.basket, &WSOL),
-            position_nft_account: damm::position_nft_account(&s.position_nft_mint),
-            pool: s.pool,
-            pool_position: damm::position(&s.position_nft_mint),
-            token_a_vault: damm::token_vault(&l.share_mint, &s.pool),
-            token_b_vault: damm::token_vault(&WSOL, &s.pool),
-            cp_amm_program: CP_AMM_ID,
-            event_authority: damm::event_authority(),
+            lb_pair: l.pool.lb_pair,
+            reserve_x: l.pool.reserve_x,
+            reserve_y: l.pool.reserve_y,
+            tight_position: l.tight_position(self),
+            backstop_position: self.backstop_or_placeholder(l),
+            dlmm_event_authority: dlmm::event_authority(),
+            dlmm_program: LB_CLMM_ID,
+            memo_program: MEMO_ID,
             token_program: spl_token::ID,
             token_2022_program: anchor_spl::token_2022::ID,
             associated_token_program: anchor_spl::associated_token::ID,
@@ -290,6 +252,7 @@ impl Env {
         }
         .to_account_metas(None);
         accounts.extend(component_metas(&l.basket, &l.share_mint, buyer, &l.book));
+        accounts.extend(self.pool_tail(l));
         Instruction {
             program_id: basket::id(),
             accounts,
@@ -303,31 +266,72 @@ impl Env {
     pub fn mint(
         &mut self,
         l: &Launched,
-        s: &SeededBasket,
         buyer: &Keypair,
         deposits: &[u64],
         min_shares_out: u64,
         max_sleeve_lamports: u64,
     ) -> MintResult {
-        let ix = self.mint_ix(l, s, &buyer.pubkey(), deposits, min_shares_out, max_sleeve_lamports);
+        let ix = self.mint_ix(l, &buyer.pubkey(), deposits, min_shares_out, max_sleeve_lamports);
         let meta = self.send_ok(&[ix], buyer, &[]);
         MintResult { cu: meta.compute_units_consumed, logs: meta.logs }
     }
 
-    /// Holder shares outstanding: supply − shares sitting in the basket's
-    /// pool position (+ shares mid-redemption).
-    pub fn holder_shares(&self, l: &Launched, s: &SeededBasket) -> u64 {
-        let pool = self.pool_state(&s.pool);
-        let pos = self.position_state(&damm::position(&s.position_nft_mint));
-        let a = math::position_shares(pos.unlocked_liquidity, pool.sqrt_min_price, pool.sqrt_price, pool.sqrt_max_price)
-            .unwrap();
+    /// A funded buyer who mints `deposits` with no slippage bounds.
+    pub fn mint_from_new_buyer(&mut self, l: &Launched, deposits: &[u64]) -> (Keypair, MintResult) {
+        let buyer = self.fund(100 * LAMPORTS);
+        self.fund_components_for(&buyer.pubkey(), l, deposits);
+        let r = self.mint(l, &buyer, deposits, 0, u64::MAX);
+        (buyer, r)
+    }
+
+    // ---- pool reads ----
+
+    pub fn tight_amounts(&self, l: &Launched) -> PositionAmounts {
         let b: Basket = self.load(&l.basket);
-        self.mint_supply(&l.share_mint) - a + b.pending_redeem_shares
+        if !b.tight.is_set() {
+            return PositionAmounts::default();
+        }
+        l.pool.position_amounts(self, &b.tight.key)
+    }
+
+    /// Backstop amounts while it holds liquidity (FUNDING / LIVE / WITHDRAWING).
+    pub fn backstop_amounts(&self, l: &Launched) -> PositionAmounts {
+        let b: Basket = self.load(&l.basket);
+        let holds = matches!(b.backstop_state, BACKSTOP_FUNDING | BACKSTOP_LIVE | BACKSTOP_WITHDRAWING);
+        if !holds || !b.backstop.is_set() {
+            return PositionAmounts::default();
+        }
+        l.pool.position_amounts(self, &b.backstop.key)
+    }
+
+    pub fn idle_shares(&self, l: &Launched) -> u64 {
+        self.token_amount(&Env::ata(&l.basket, &l.share_mint))
+    }
+
+    pub fn idle_sol(&self, l: &Launched) -> u64 {
+        self.token_amount(&Env::ata(&l.basket, &WSOL))
+    }
+
+    /// Treasury shares in both positions.
+    pub fn shares_in_positions(&self, l: &Launched) -> u64 {
+        self.tight_amounts(l).amount_x + self.backstop_amounts(l).amount_x
+    }
+
+    /// SOL in both positions (excludes idle).
+    pub fn sol_in_positions(&self, l: &Launched) -> u64 {
+        self.tight_amounts(l).amount_y + self.backstop_amounts(l).amount_y
+    }
+
+    /// Holder shares outstanding: supply − shares in positions − idle shares
+    /// (+ shares mid-redemption). The denominator of every pro-rata rule.
+    pub fn holder_shares(&self, l: &Launched) -> u64 {
+        let b: Basket = self.load(&l.basket);
+        self.mint_supply(&l.share_mint) - self.shares_in_positions(l) - self.idle_shares(l) + b.pending_redeem_shares
     }
 
     /// Off-chain mirror of `mint`: creation-unit shares, step-rule `r`,
-    /// treasury shares and the SOL the pool will pull.
-    pub fn mint_quote(&self, l: &Launched, s: &SeededBasket, deposits: &[u64]) -> MintQuote {
+    /// treasury shares and the SOL the pool will take at the active bin.
+    pub fn mint_quote(&self, l: &Launched, deposits: &[u64]) -> MintQuote {
         // Priced off `vault − owed`: amounts owed to frozen claimants do not back holder shares.
         let vaults: Vec<u64> = l
             .mints
@@ -337,21 +341,32 @@ impl Env {
                 self.token_amount(&Env::ata(&l.basket, m)) - p.owed
             })
             .collect();
-        let h = self.holder_shares(l, s);
+        let h = self.holder_shares(l);
         let gross_shares = math::shares_for_deposits(deposits, &vaults, h).unwrap();
         let b: Basket = self.load(&l.basket);
-        let pool = self.pool_state(&s.pool);
-        let r_bps = if pool.token_b_amount < b.sleeve.step_threshold_lamports { b.sleeve.step_r_bps } else { b.sleeve.r_bps };
+        let pool_sol = self.sol_in_positions(l) + self.idle_sol(l);
+        let r_bps = if pool_sol < b.sleeve.step_threshold_lamports { b.sleeve.step_r_bps } else { b.sleeve.r_bps };
         let y = math::treasury_shares(gross_shares, r_bps).unwrap();
-        let target_b = math::lamports_for_shares(y, pool.sqrt_price).unwrap();
-        let q = math::sleeve_quote(target_b, y, pool.sqrt_min_price, pool.sqrt_price, pool.sqrt_max_price).unwrap();
-        MintQuote {
-            gross_shares,
-            r_bps,
-            nominal_treasury_shares: y,
-            treasury_shares: q.amount_a,
-            sleeve_lamports: q.amount_b,
-            liquidity: q.liquidity,
+        let active = l.pool.active_id(self);
+        let sleeve_lamports = dlmm::lamports_for_x(y, l.pool.price_q64(active)).unwrap();
+        let config = self.config();
+        let (mut backstop_x, mut backstop_y) = (0, 0);
+        if b.backstop_live() && b.backstop.contains(active) {
+            let lower = (active - dlmm::DEFAULT_BIN_PER_POSITION / 2).max(b.backstop.lower_bin_id);
+            let upper = (lower + dlmm::DEFAULT_BIN_PER_POSITION - 1).min(b.backstop.upper_bin_id);
+            let (xb, yb) = basket::instructions::sleeve::side_bins(lower, upper, active);
+            if xb > 0 {
+                backstop_x = math::bps(y, config.pools.backstop_slice_bps).unwrap();
+            }
+            if yb > 0 {
+                backstop_y = math::bps(sleeve_lamports, config.pools.backstop_slice_bps).unwrap();
+            }
         }
+        MintQuote { gross_shares, r_bps, treasury_shares: y, sleeve_lamports, backstop_x, backstop_y }
+    }
+
+    /// Component vault balances in book order.
+    pub fn vaults(&self, l: &Launched) -> Vec<u64> {
+        l.mints.iter().map(|m| self.token_amount(&Env::ata(&l.basket, m))).collect()
     }
 }

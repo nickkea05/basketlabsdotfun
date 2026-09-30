@@ -1,6 +1,7 @@
-//! Client-side builders for the Meteora DLMM (`lb_clmm`) fixture. Used by the
-//! spike (`tests/dlmm_spike.rs`) and, after the change order lands, by the
-//! seed / mint / redeem / recenter harness to read pool state.
+//! Client-side builders and readers for the Meteora DLMM (`lb_clmm`)
+//! fixture: pool creation, bin arrays, PDA positions, add / remove / claim /
+//! close, swaps, and the position-amount arithmetic the program's `PoolView`
+//! does on-chain (mirrored here so tests can check NAV bookkeeping).
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -13,17 +14,30 @@ use solana_signer::Signer;
 use super::{Env, LAMPORTS, WSOL};
 
 pub const LB_CLMM_ID: Pubkey = dlmm::LB_CLMM_ID;
-pub const MEMO_ID: Pubkey = pubkey!("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+pub const MEMO_ID: Pubkey = dlmm::MEMO_PROGRAM_ID;
 pub const RENT_SYSVAR: Pubkey = pubkey!("SysvarRent111111111111111111111111111111111");
 
-/// A pool with `token_x` = share-like mint (6 dp) and `token_y` = wSOL.
+/// A pool with `token_x` = `mint_x` and `token_y` = `mint_y` (wSOL for
+/// basket pools).
+#[derive(Clone, Copy, Debug)]
 pub struct DlmmPool {
     pub lb_pair: Pubkey,
     pub mint_x: Pubkey,
+    pub mint_y: Pubkey,
     pub reserve_x: Pubkey,
     pub reserve_y: Pubkey,
     pub oracle: Pubkey,
     pub bin_step: u16,
+}
+
+/// Token amounts a position holds, derived from its bin shares and the bin
+/// arrays exactly as the program does (X rounded up, Y down).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PositionAmounts {
+    pub lower_bin_id: i32,
+    pub upper_bin_id: i32,
+    pub amount_x: u64,
+    pub amount_y: u64,
 }
 
 impl DlmmPool {
@@ -31,6 +45,10 @@ impl DlmmPool {
         let acc = env.account(&self.lb_pair).expect("lb_pair missing");
         assert_eq!(acc.owner, LB_CLMM_ID);
         bytemuck::pod_read_unaligned(&acc.data[8..8 + std::mem::size_of::<lb_clmm::accounts::LbPair>()])
+    }
+
+    pub fn exists(&self, env: &Env) -> bool {
+        env.account(&self.lb_pair).map(|a| a.owner == LB_CLMM_ID).unwrap_or(false)
     }
 
     pub fn active_id(&self, env: &Env) -> i32 {
@@ -75,6 +93,47 @@ impl DlmmPool {
         }
         (x, y)
     }
+
+    /// Price of bin `id` in Q64.64 lamports (Y base units) per X base unit.
+    pub fn price_q64(&self, id: i32) -> u128 {
+        dlmm::bin_price_q64(id, self.bin_step).unwrap()
+    }
+
+    /// Mirror of `PoolView::read_position`.
+    pub fn position_amounts(&self, env: &Env, position: &Pubkey) -> PositionAmounts {
+        let acc = env.account(position).expect("position missing");
+        assert_eq!(acc.owner, LB_CLMM_ID, "not a DLMM position");
+        let h = dlmm::position_header(&acc.data).expect("position header");
+        assert_eq!(h.lb_pair, self.lb_pair);
+        let mut out = PositionAmounts { lower_bin_id: h.lower_bin_id, upper_bin_id: h.upper_bin_id, amount_x: 0, amount_y: 0 };
+        for offset in 0..(h.upper_bin_id - h.lower_bin_id + 1) {
+            let share = dlmm::position_bin_share(&acc.data, offset as usize).unwrap();
+            if share == 0 {
+                continue;
+            }
+            let bin_id = h.lower_bin_id + offset;
+            let idx = dlmm::bin_array_index(bin_id);
+            let arr = env.account(&self.bin_array(idx)).expect("bin array missing");
+            let slot = (bin_id - dlmm::array_lower_bin(idx)) as usize;
+            let bin = dlmm::bin_at(&arr.data, slot).unwrap();
+            if bin.liquidity_supply == 0 {
+                continue;
+            }
+            let (x, y) = if share >= bin.liquidity_supply {
+                (bin.amount_x, bin.amount_y)
+            } else {
+                let x = ruint::aliases::U256::from(bin.amount_x) * ruint::aliases::U256::from(share);
+                let (xq, xr) = x.div_rem(ruint::aliases::U256::from(bin.liquidity_supply));
+                let xq = if xr.is_zero() { xq } else { xq + ruint::aliases::U256::from(1u8) };
+                let y = ruint::aliases::U256::from(bin.amount_y) * ruint::aliases::U256::from(share)
+                    / ruint::aliases::U256::from(bin.liquidity_supply);
+                (u64::try_from(xq).unwrap(), u64::try_from(y).unwrap())
+            };
+            out.amount_x += x;
+            out.amount_y += y;
+        }
+        out
+    }
 }
 
 pub fn load_position(env: &Env, position: &Pubkey) -> lb_clmm::accounts::PositionV2 {
@@ -83,24 +142,47 @@ pub fn load_position(env: &Env, position: &Pubkey) -> lb_clmm::accounts::Positio
     bytemuck::pod_read_unaligned(&acc.data[8..8 + std::mem::size_of::<lb_clmm::accounts::PositionV2>()])
 }
 
+/// Position header (owner, range) without copying the whole account.
+pub fn position_header(env: &Env, position: &Pubkey) -> dlmm::PositionHeader {
+    let acc = env.account(position).expect("position missing");
+    dlmm::position_header(&acc.data).expect("position header")
+}
+
 impl Env {
     /// `initialize_customizable_permissionless_lb_pair2` with X = `mint_x`,
-    /// Y = wSOL, `active_id` as the starting bin, flat base fee `fee_bps`.
+    /// Y = wSOL, `active_id` as the starting bin, flat base fee `fee_bps`,
+    /// fees collected in the input token (the spike's setting).
     pub fn create_dlmm_pool(&mut self, funder: &Keypair, mint_x: Pubkey, bin_step: u16, fee_bps: u64, active_id: i32) -> DlmmPool {
-        let lb_pair = dlmm::customizable_lb_pair(&mint_x, &WSOL);
+        self.create_dlmm_pool_xy(funder, mint_x, WSOL, bin_step, fee_bps, active_id, dlmm::COLLECT_FEE_MODE_INPUT_ONLY)
+    }
+
+    /// General form: any X / Y pair and collect-fee mode. The funder must
+    /// already hold ATAs for both mints (created here if missing).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_dlmm_pool_xy(
+        &mut self,
+        funder: &Keypair,
+        mint_x: Pubkey,
+        mint_y: Pubkey,
+        bin_step: u16,
+        fee_bps: u64,
+        active_id: i32,
+        collect_fee_mode: u8,
+    ) -> DlmmPool {
+        let lb_pair = dlmm::customizable_lb_pair(&mint_x, &mint_y);
         let reserve_x = dlmm::reserve(&lb_pair, &mint_x);
-        let reserve_y = dlmm::reserve(&lb_pair, &WSOL);
+        let reserve_y = dlmm::reserve(&lb_pair, &mint_y);
         let oracle = dlmm::oracle(&lb_pair);
         let (base_factor, base_fee_power_factor) = dlmm::base_factor_for_fee_bps(bin_step, fee_bps).expect("fee not representable");
         let user_x = self.create_ata(&funder.pubkey(), &mint_x);
-        let user_y = self.create_ata(&funder.pubkey(), &WSOL);
+        let user_y = self.create_ata(&funder.pubkey(), &mint_y);
         let ix = Instruction {
             program_id: LB_CLMM_ID,
             accounts: lb_clmm::client::accounts::InitializeCustomizablePermissionlessLbPair2 {
                 lb_pair,
                 bin_array_bitmap_extension: None,
                 token_mint_x: mint_x,
-                token_mint_y: WSOL,
+                token_mint_y: mint_y,
                 reserve_x,
                 reserve_y,
                 oracle,
@@ -127,7 +209,7 @@ impl Env {
                     creator_pool_on_off_control: false,
                     base_fee_power_factor,
                     concrete_function_type: 0,
-                    collect_fee_mode: dlmm::COLLECT_FEE_MODE_INPUT_ONLY,
+                    collect_fee_mode,
                     padding: [0u8; 60],
                 },
             }
@@ -135,7 +217,7 @@ impl Env {
         };
         let meta = self.send_ok(&[ix], funder, &[]);
         eprintln!("create pool CU {}", meta.compute_units_consumed);
-        DlmmPool { lb_pair, mint_x, reserve_x, reserve_y, oracle, bin_step }
+        DlmmPool { lb_pair, mint_x, mint_y, reserve_x, reserve_y, oracle, bin_step }
     }
 
     pub fn init_bin_array_ix(&self, pool: &DlmmPool, funder: &Pubkey, index: i64) -> Instruction {
@@ -221,6 +303,7 @@ impl Env {
         (position, m.compute_units_consumed)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_liquidity_spot_ix(
         &self,
         pool: &DlmmPool,
@@ -232,50 +315,14 @@ impl Env {
         min_bin_id: i32,
         max_bin_id: i32,
     ) -> Instruction {
-        let mut accounts = lb_clmm::client::accounts::AddLiquidityByStrategy2 {
-            position: *position,
-            lb_pair: pool.lb_pair,
-            bin_array_bitmap_extension: None,
-            user_token_x: Env::ata(owner, &pool.mint_x),
-            user_token_y: Env::ata(owner, &WSOL),
-            reserve_x: pool.reserve_x,
-            reserve_y: pool.reserve_y,
-            token_x_mint: pool.mint_x,
-            token_y_mint: WSOL,
-            sender: *owner,
-            token_x_program: spl_token::ID,
-            token_y_program: spl_token::ID,
-            event_authority: dlmm::event_authority(),
-            program: LB_CLMM_ID,
-        }
-        .to_account_metas(None);
-        accounts.extend(pool.bin_array_metas(min_bin_id, max_bin_id));
-        Instruction {
-            program_id: LB_CLMM_ID,
-            accounts,
-            data: lb_clmm::client::args::AddLiquidityByStrategy2 {
-                liquidity_parameter: lb_clmm::types::LiquidityParameterByStrategy {
-                    amount_x,
-                    amount_y,
-                    active_id,
-                    max_active_bin_slippage: 3,
-                    strategy_parameters: lb_clmm::types::StrategyParameters {
-                        min_bin_id,
-                        max_bin_id,
-                        strategy_type: lb_clmm::types::StrategyType::SpotBalanced,
-                        parameteres: [0u8; 64],
-                    },
-                },
-                remaining_accounts_info: lb_clmm::types::RemainingAccountsInfo { slices: vec![] },
-            }
-            .data(),
-        }
+        self.add_liquidity_ix(pool, position, owner, amount_x, amount_y, active_id, min_bin_id, max_bin_id, lb_clmm::types::StrategyType::SpotBalanced)
     }
 
     /// Deposit `[lower, upper]` one bin array at a time (the program runs out
     /// of heap past ~70 bins per call). Y is spread over bins < active, X over
     /// bins > active, the active bin takes both; each chunk gets its
     /// proportional slice so the whole range ends up flat. Returns CU per call.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_liquidity_chunked(
         &mut self,
         pool: &DlmmPool,
@@ -297,9 +344,7 @@ impl Env {
             let c_hi = ((arr as i32 + 1) * dlmm::MAX_BIN_PER_ARRAY - 1).min(upper);
             let has_active = active_id >= c_lo && active_id <= c_hi;
             let len = (c_hi - c_lo + 1) as u64;
-            // X bins in this chunk: those > active, plus the active bin itself.
             let cx = if has_active { (c_hi - active_id) as u64 + 1 } else if c_lo > active_id { len } else { 0 };
-            // Y bins in this chunk: those < active, plus the active bin itself.
             let cy = if has_active { (active_id - c_lo) as u64 + 1 } else if c_hi < active_id { len } else { 0 };
             let ax = if x_bins == 0 { 0 } else if arr == hi_arr { x_left } else { amount_x * cx / x_bins };
             let ay = if y_bins == 0 { 0 } else if arr == hi_arr { y_left } else { amount_y * cy / y_bins };
@@ -317,6 +362,7 @@ impl Env {
         cus
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_liquidity_ix(
         &self,
         pool: &DlmmPool,
@@ -329,24 +375,44 @@ impl Env {
         max_bin_id: i32,
         strategy_type: lb_clmm::types::StrategyType,
     ) -> Instruction {
-        let mut ix = self.add_liquidity_spot_ix(pool, position, owner, amount_x, amount_y, active_id, min_bin_id, max_bin_id);
-        ix.data = lb_clmm::client::args::AddLiquidityByStrategy2 {
-            liquidity_parameter: lb_clmm::types::LiquidityParameterByStrategy {
-                amount_x,
-                amount_y,
-                active_id,
-                max_active_bin_slippage: 3,
-                strategy_parameters: lb_clmm::types::StrategyParameters {
-                    min_bin_id,
-                    max_bin_id,
-                    strategy_type,
-                    parameteres: [0u8; 64],
-                },
-            },
-            remaining_accounts_info: lb_clmm::types::RemainingAccountsInfo { slices: vec![] },
+        let mut accounts = lb_clmm::client::accounts::AddLiquidityByStrategy2 {
+            position: *position,
+            lb_pair: pool.lb_pair,
+            bin_array_bitmap_extension: None,
+            user_token_x: Env::ata(owner, &pool.mint_x),
+            user_token_y: Env::ata(owner, &pool.mint_y),
+            reserve_x: pool.reserve_x,
+            reserve_y: pool.reserve_y,
+            token_x_mint: pool.mint_x,
+            token_y_mint: pool.mint_y,
+            sender: *owner,
+            token_x_program: spl_token::ID,
+            token_y_program: spl_token::ID,
+            event_authority: dlmm::event_authority(),
+            program: LB_CLMM_ID,
         }
-        .data();
-        ix
+        .to_account_metas(None);
+        accounts.extend(pool.bin_array_metas(min_bin_id, max_bin_id));
+        Instruction {
+            program_id: LB_CLMM_ID,
+            accounts,
+            data: lb_clmm::client::args::AddLiquidityByStrategy2 {
+                liquidity_parameter: lb_clmm::types::LiquidityParameterByStrategy {
+                    amount_x,
+                    amount_y,
+                    active_id,
+                    max_active_bin_slippage: 3,
+                    strategy_parameters: lb_clmm::types::StrategyParameters {
+                        min_bin_id,
+                        max_bin_id,
+                        strategy_type,
+                        parameteres: [0u8; 64],
+                    },
+                },
+                remaining_accounts_info: lb_clmm::types::RemainingAccountsInfo { slices: vec![] },
+            }
+            .data(),
+        }
     }
 
     pub fn remove_liquidity_range_ix(
@@ -363,11 +429,11 @@ impl Env {
             lb_pair: pool.lb_pair,
             bin_array_bitmap_extension: None,
             user_token_x: Env::ata(owner, &pool.mint_x),
-            user_token_y: Env::ata(owner, &WSOL),
+            user_token_y: Env::ata(owner, &pool.mint_y),
             reserve_x: pool.reserve_x,
             reserve_y: pool.reserve_y,
             token_x_mint: pool.mint_x,
-            token_y_mint: WSOL,
+            token_y_mint: pool.mint_y,
             sender: *owner,
             token_x_program: spl_token::ID,
             token_y_program: spl_token::ID,
@@ -398,9 +464,9 @@ impl Env {
             reserve_x: pool.reserve_x,
             reserve_y: pool.reserve_y,
             user_token_x: Env::ata(owner, &pool.mint_x),
-            user_token_y: Env::ata(owner, &WSOL),
+            user_token_y: Env::ata(owner, &pool.mint_y),
             token_x_mint: pool.mint_x,
-            token_y_mint: WSOL,
+            token_y_mint: pool.mint_y,
             token_program_x: spl_token::ID,
             token_program_y: spl_token::ID,
             memo_program: MEMO_ID,
@@ -436,13 +502,14 @@ impl Env {
         }
     }
 
-    /// `swap2` exact-in. `x_to_y` sells X for wSOL. Bin arrays around the
-    /// active bin (`span` arrays each side) are passed as remaining accounts.
+    /// `swap2` exact-in. `x_to_y` sells X for Y. Bin arrays covering
+    /// `[lower, upper]` are passed as remaining accounts.
+    #[allow(clippy::too_many_arguments)]
     pub fn swap_ix(&self, pool: &DlmmPool, user: &Pubkey, x_to_y: bool, amount_in: u64, min_out: u64, lower: i32, upper: i32) -> Instruction {
         let (user_in, user_out) = if x_to_y {
-            (Env::ata(user, &pool.mint_x), Env::ata(user, &WSOL))
+            (Env::ata(user, &pool.mint_x), Env::ata(user, &pool.mint_y))
         } else {
-            (Env::ata(user, &WSOL), Env::ata(user, &pool.mint_x))
+            (Env::ata(user, &pool.mint_y), Env::ata(user, &pool.mint_x))
         };
         let mut accounts = lb_clmm::client::accounts::Swap2 {
             lb_pair: pool.lb_pair,
@@ -452,7 +519,7 @@ impl Env {
             user_token_in: user_in,
             user_token_out: user_out,
             token_x_mint: pool.mint_x,
-            token_y_mint: WSOL,
+            token_y_mint: pool.mint_y,
             oracle: pool.oracle,
             host_fee_in: None,
             user: *user,
@@ -474,6 +541,16 @@ impl Env {
             }
             .data(),
         }
+    }
+
+    /// Every existing bin array of `pool` (by scanning a bin index window),
+    /// as writable metas: what the basket instructions want in their tail.
+    pub fn existing_bin_array_metas(&self, pool: &DlmmPool, lower: i32, upper: i32) -> Vec<AccountMeta> {
+        let (lo, hi) = dlmm::bin_array_range(lower, upper);
+        (lo..=hi)
+            .filter(|i| self.account(&pool.bin_array(*i)).is_some())
+            .map(|i| AccountMeta::new(pool.bin_array(i), false))
+            .collect()
     }
 }
 
