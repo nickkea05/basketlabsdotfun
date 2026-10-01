@@ -1,191 +1,222 @@
-//! `sweep_fees`: split everything the FeeVault has accumulated since the
-//! last sweep (shares from mint/redeem fees, SOL from pool fees) into
-//! holders 40% (stays in the vault, reserved for rewards) / creator 30% /
-//! protocol 30%, per the schedule frozen into the basket (§4).
+//! `sweep_fees` / `sweep_fees_components` (change order Q1): the mint and
+//! redeem fees withheld as shares in the FeeVault are split by the schedule
+//! frozen into the basket — the creator's line is paid in shares, the rest
+//! is redeemed in kind: the tight SOL leg is routed to BUYBACK / team /
+//! PRIZE at once, the components land in the FeeVault's own ATAs for
+//! `settle_fees`. Nothing here prices anything.
 
 mod common;
 
 use anchor_lang::prelude::*;
 use basket::constants::*;
+use basket::error::BasketError;
 use basket::state::*;
 use common::*;
 use solana_signer::Signer as _;
 
-fn seeded(env: &mut Env, n: usize, nonce: u64) -> (Launched, SeededBasket) {
-    let l = env.launch_fixed(n, nonce);
-    let plan = SeedPlan::default_for(&l);
-    let s = env.seed(&l, &plan);
-    (l, s)
+struct Lines {
+    buyback: u64,
+    team: u64,
+    prize: u64,
 }
 
-fn split(total: u64, fees: &FeeSchedule) -> (u64, u64, u64) {
-    let holder = total * fees.holder_split_bps as u64 / BPS_TOTAL as u64;
-    let creator = total * fees.creator_split_bps as u64 / BPS_TOTAL as u64;
-    (holder, creator, total - holder - creator)
+fn lines(env: &Env) -> Lines {
+    let config = env.config();
+    Lines { buyback: env.lamports(&buyback_vault_pda()), team: env.lamports(&config.team_wallet), prize: env.lamports(&prize_vault_pda()) }
+}
+
+fn protocol_split(fees: &FeeSchedule, amount: u64) -> (u64, u64, u64) {
+    let total = (fees.buyback_split_bps + fees.team_split_bps + fees.prize_split_bps) as u64;
+    let buyback = amount * fees.buyback_split_bps as u64 / total;
+    let team = amount * fees.team_split_bps as u64 / total;
+    (buyback, team, amount - buyback - team)
 }
 
 #[test]
-fn sweeps_shares_and_sol_by_the_basket_split() {
+fn sweep_pays_the_creator_in_shares_and_settles_the_rest_in_kind() {
     let mut env = Env::initialized();
-    let (l, s) = seeded(&mut env, 3, 1);
-    let b: Basket = env.load(&l.basket);
-    assert_eq!((b.fees.holder_split_bps, b.fees.creator_split_bps, b.fees.protocol_split_bps), (4_000, 3_000, 3_000));
+    let (l, _) = env.launch_and_seed(3, 1);
+    let b = l.basket_state(&env);
+    let fees = b.fees;
     let fee_vault = fee_vault_pda(&l.share_mint);
-    let fee_share_ata = Env::ata(&fee_vault, &l.share_mint);
-
-    // Shares: the 1% seed mint fee. SOL: pool fees from a trade, claimed.
-    let shares_total = env.token_amount(&fee_share_ata);
-    assert_eq!(shares_total, SeedPlan::default_for(&l).initial_shares / 100);
-    let trader = env.fund(10 * LAMPORTS);
-    // (0.3 SOL sleeve with an 8× ceiling: a 2 SOL buy would run off the range.)
-    env.buy_shares(&l, &s, &trader, LAMPORTS / 2);
-    let sol_total = env.claim_pool_fees(&l, &s, &trader);
-    assert!(sol_total > 0);
-
     let creator = l.creator.pubkey();
-    env.svm.airdrop(&creator, LAMPORTS).unwrap();
-    let treasury = env.treasury.pubkey();
+
+    // Shares in the FeeVault: the 1 % seed mint fee plus a mint's fee.
+    let plan = SeedPlan::default_for(&l);
+    assert_eq!(env.fee_shares(&l), plan.initial_shares / 100);
+    let deposits: Vec<u64> = env.vaults(&l).iter().map(|v| v / 4).collect();
+    let q = env.mint_quote(&l, &deposits);
+    env.mint_from_new_buyer(&l, &deposits);
+    let shares_total = env.fee_shares(&l);
+    assert_eq!(shares_total, plan.initial_shares / 100 + q.gross_shares * DEFAULT_MINT_FEE_BPS as u64 / BPS_TOTAL as u64);
+
+    let h = env.holder_shares(&l);
+    let vaults = env.vaults(&l);
+    let tight_before = env.tight_amounts(&l);
+    let idle_y = env.idle_sol(&l);
+    let idle_x = env.idle_shares(&l);
+    let supply_before = env.mint_supply(&l.share_mint);
+    let before = lines(&env);
     let creator_sol_before = env.lamports(&creator);
-    let treasury_sol_before = env.lamports(&treasury);
-    let treasury_shares_before = env.token_amount(&Env::ata(&treasury, &l.share_mint));
-
+    // The creator is the deployer, who made the first buy: they hold shares already.
+    let creator_shares_before = env.token_amount(&Env::ata(&creator, &l.share_mint));
     let caller = env.fund(LAMPORTS);
+    let caller_before = env.lamports(&caller.pubkey());
+
     let cu = env.sweep_fees(&l, &caller);
-    println!("sweep_fees CU: {cu}");
+    eprintln!("sweep_fees CU: {cu}");
 
-    let (hs, cs, ps) = split(shares_total, &b.fees);
-    let (hl, cl, pl) = split(sol_total, &b.fees);
-    assert_eq!(env.token_amount(&Env::ata(&creator, &l.share_mint)), cs, "creator shares");
-    assert_eq!(env.token_amount(&Env::ata(&treasury, &l.share_mint)), treasury_shares_before + ps, "protocol shares");
-    assert_eq!(env.token_amount(&fee_share_ata), hs, "holder shares stay in the vault");
-    assert_eq!(env.lamports(&creator) - creator_sol_before, cl, "creator SOL");
-    assert_eq!(env.lamports(&treasury) - treasury_sol_before, pl, "protocol SOL");
-    assert_eq!(env.fee_vault_free_lamports(&l), hl, "holder SOL stays in the vault");
-
-    let v = env.fee_vault(&l);
-    assert_eq!((v.holder_reserve_shares, v.holder_reserve_lamports), (hs, hl));
-    assert_eq!((v.swept_creator_shares, v.swept_creator_lamports), (cs, cl));
-    assert_eq!((v.swept_protocol_shares, v.swept_protocol_lamports), (ps, pl));
-    // Protocol is never the largest line.
-    assert!(ps <= hs && pl <= hl);
+    // Creator: 20 % in shares, nothing in SOL.
+    let creator_shares = shares_total * fees.creator_split_bps as u64 / BPS_TOTAL as u64;
+    assert_eq!(env.token_amount(&Env::ata(&creator, &l.share_mint)), creator_shares_before + creator_shares);
+    assert_eq!(env.lamports(&creator), creator_sol_before);
+    // The rest was burned and redeemed in kind at net / H.
+    let net = shares_total - creator_shares;
+    assert_eq!(env.fee_shares(&l), 0);
+    for (i, mint) in l.mints.iter().enumerate() {
+        let expected = (vaults[i] as u128 * net as u128 / h as u128) as u64;
+        assert_eq!(env.token_amount(&Env::ata(&fee_vault, mint)), expected, "component {i} in the FeeVault's ATA");
+        assert_eq!(env.token_amount(&Env::ata(&l.basket, mint)), vaults[i] - expected);
+    }
+    // SOL leg: net / H of tight SOL + idle SOL, routed 50 / 25 / 5 (scaled to the three lines).
+    let pool_sol = tight_before.amount_y + idle_y;
+    let sol = (pool_sol as u128 * net as u128 / h as u128) as u64;
+    let after = lines(&env);
+    let routed = (after.buyback - before.buyback) + (after.team - before.team) + (after.prize - before.prize);
+    assert!(routed <= sol && sol - routed <= 70, "routed {routed} vs pro-rata {sol}");
+    let (bb, tm, pz) = protocol_split(&fees, routed);
+    assert_eq!((after.buyback - before.buyback, after.team - before.team, after.prize - before.prize), (bb, tm, pz));
+    assert_eq!(env.fee_vault_free_lamports(&l), 0, "nothing left on the FeeVault");
+    // Withdrawn treasury shares burned along with the settled fee shares.
+    let tight = env.tight_amounts(&l);
+    let x_out = tight_before.amount_x - tight.amount_x;
+    let idle_x_share = (idle_x as u128 * net as u128 / h as u128) as u64;
+    assert_eq!(env.mint_supply(&l.share_mint), supply_before - net - x_out - idle_x_share);
+    assert!(env.holder_shares(&l).abs_diff(h - net) <= 1);
+    // Bookkeeping closed out.
+    let b = l.basket_state(&env);
+    assert_eq!(b.pending_redeem_shares, 0);
+    assert!(env.account(&redemption_pda(&l.share_mint, &fee_vault)).is_none(), "redemption closed");
+    let fv = env.fee_vault(&l);
+    assert_eq!((fv.swept_creator_shares, fv.unsettled_shares), (creator_shares, 0));
+    assert_eq!((fv.routed_buyback_lamports, fv.routed_team_lamports, fv.routed_prize_lamports), (bb, tm, pz));
+    // The caller paid tx fees plus the creator's share ATA (theirs to keep);
+    // the temporary wSOL account's rent came back.
+    let spent = caller_before - env.lamports(&caller.pubkey());
+    assert!(spent < 3 * 2_100_000 + 50_000, "caller spent {spent} (the FeeVault's component ATAs)");
+    assert!(env.account(&Env::ata(&fee_vault, &WSOL)).is_none());
 }
 
 #[test]
-fn sweep_moves_only_what_arrived_since_the_last_sweep() {
+fn sweep_needs_something_to_sweep_and_only_moves_what_accrued() {
     let mut env = Env::initialized();
-    let (l, s) = seeded(&mut env, 2, 2);
-    let creator = l.creator.pubkey();
+    let (l, _) = env.launch_and_seed(2, 2);
     let caller = env.fund(LAMPORTS);
+    let creator = l.creator.pubkey();
     env.sweep_fees(&l, &caller);
-    let v1 = env.fee_vault(&l);
     let creator_shares_1 = env.token_amount(&Env::ata(&creator, &l.share_mint));
-    let creator_sol_1 = env.lamports(&creator);
+    let fv1 = env.fee_vault(&l);
 
-    // Nothing new: a second sweep is a no-op.
-    env.sweep_fees(&l, &caller);
-    let v2 = env.fee_vault(&l);
-    assert_eq!(v2.holder_reserve_shares, v1.holder_reserve_shares);
-    assert_eq!(v2.swept_creator_shares, v1.swept_creator_shares);
-    assert_eq!(env.token_amount(&Env::ata(&creator, &l.share_mint)), creator_shares_1);
-    assert_eq!(env.lamports(&creator), creator_sol_1);
+    // Nothing new: refused (the Redemption account would be re-created for nothing).
+    let ix = env.sweep_fees_ix(&l, &caller.pubkey());
+    env.send_expect_err(&[ix], &caller, &[], err(BasketError::ZeroAmount));
 
-    // A redeem adds 0.25% of the redeemed shares; only that is split.
+    // A redeem adds 0.25 % of the redeemed shares; only that is swept.
     let holder = l.payer.insecure_clone();
     let gross = env.token_amount(&Env::ata(&holder.pubkey(), &l.share_mint)) / 2;
     let fee = gross * DEFAULT_REDEEM_FEE_BPS as u64 / BPS_TOTAL as u64;
-    env.redeem(&l, &s, &holder, gross);
+    env.redeem(&l, &holder, gross);
+    assert_eq!(env.fee_shares(&l), fee);
+    let b = l.basket_state(&env);
+    // (The holder is the creator: they just redeemed half their shares.)
+    let creator_shares_2 = env.token_amount(&Env::ata(&creator, &l.share_mint));
+    assert_eq!(creator_shares_2, creator_shares_1 - gross);
     env.sweep_fees(&l, &caller);
-    let b: Basket = env.load(&l.basket);
-    let (hs, cs, ps) = split(fee, &b.fees);
-    let v3 = env.fee_vault(&l);
-    assert_eq!(v3.holder_reserve_shares, v1.holder_reserve_shares + hs);
-    assert_eq!(v3.swept_creator_shares, v1.swept_creator_shares + cs);
-    assert_eq!(v3.swept_protocol_shares, v1.swept_protocol_shares + ps);
-    assert_eq!(env.token_amount(&Env::ata(&creator, &l.share_mint)), creator_shares_1 + cs);
-    // SOL side untouched (no pool fees claimed).
-    assert_eq!(env.lamports(&creator), creator_sol_1);
-    assert_eq!(v3.holder_reserve_lamports, v1.holder_reserve_lamports);
+    let creator_shares = fee * b.fees.creator_split_bps as u64 / BPS_TOTAL as u64;
+    assert_eq!(env.token_amount(&Env::ata(&creator, &l.share_mint)), creator_shares_2 + creator_shares);
+    let fv2 = env.fee_vault(&l);
+    assert_eq!(fv2.swept_creator_shares, fv1.swept_creator_shares + creator_shares);
+    assert_eq!(env.fee_shares(&l), 0);
 }
 
 #[test]
 fn sweep_uses_the_schedule_frozen_into_the_basket() {
     let mut env = Env::initialized();
-    let (l, _s) = seeded(&mut env, 2, 3);
-    // Admin changes the defaults for future baskets: 50/25/25.
-    let mut fees = FeeDefaults::default();
-    fees.holder_split_bps = 5_000;
-    fees.creator_split_bps = 2_500;
-    fees.protocol_split_bps = 2_500;
-    let ix = env.admin_ix(
-        anchor_lang::InstructionData::data(&basket::instruction::UpdateConfig {
-            update: ConfigUpdate { fees: Some(fees), ..Default::default() },
-        }),
-    );
-    let admin = env.admin.insecure_clone();
-    env.send_ok(&[ix], &admin, &[]);
+    let (l, _) = env.launch_and_seed(2, 3);
+    // Admin raises the base tier for future baskets to 30 %.
+    env.update_config(ConfigUpdate { creator_tier_bps: Some([3_000; TIER_COUNT]), ..Default::default() });
+    let (l2, _) = env.launch_and_seed(2, 4);
+    assert_eq!(l.basket_state(&env).fees.creator_split_bps, 2_000);
+    assert_eq!(l2.basket_state(&env).fees.creator_split_bps, 3_000);
 
+    let caller = env.fund(LAMPORTS);
+    for (basket, bps) in [(&l, 2_000u64), (&l2, 3_000)] {
+        let total = env.fee_shares(basket);
+        let before = env.token_amount(&Env::ata(&basket.creator.pubkey(), &basket.share_mint));
+        env.sweep_fees(basket, &caller);
+        assert_eq!(env.token_amount(&Env::ata(&basket.creator.pubkey(), &basket.share_mint)) - before, total * bps / BPS_TOTAL as u64);
+    }
+}
+
+#[test]
+fn sweep_with_a_large_book_pays_components_in_chunks() {
+    let mut env = Env::initialized();
+    let (l, _) = env.launch_and_seed(9, 5);
     let fee_vault = fee_vault_pda(&l.share_mint);
-    let total = env.token_amount(&Env::ata(&fee_vault, &l.share_mint));
     let caller = env.fund(LAMPORTS);
-    env.sweep_fees(&l, &caller);
-    let b: Basket = env.load(&l.basket);
-    let (hs, cs, _) = split(total, &b.fees);
-    assert_eq!(b.fees.creator_split_bps, 3_000);
-    assert_eq!(env.token_amount(&Env::ata(&l.creator.pubkey(), &l.share_mint)), cs);
-    assert_eq!(env.fee_vault(&l).holder_reserve_shares, hs);
+    let shares_total = env.fee_shares(&l);
+    let h = env.holder_shares(&l);
+    let vaults = env.vaults(&l);
+    let b = l.basket_state(&env);
+    let net = shares_total - shares_total * b.fees.creator_split_bps as u64 / BPS_TOTAL as u64;
+
+    let m = env.send_ok(&[env.sweep_fees_ix(&l, &caller.pubkey())], &caller, &[]);
+    eprintln!("sweep_fees (N=9) CU: {}", m.compute_units_consumed);
+    let red: Redemption = env.load(&redemption_pda(&l.share_mint, &fee_vault));
+    assert_eq!((red.holder, red.shares, red.position_count, red.paid_count), (fee_vault, net, 9, 0));
+    assert_eq!(l.basket_state(&env).pending_redeem_shares, net);
+    assert_eq!(env.fee_vault(&l).unsettled_shares, net);
+    // The burned shares stay in the denominator until the components are paid.
+    assert!(env.holder_shares(&l).abs_diff(h) <= 1);
+    // A second sweep cannot start while this one is open.
+    let ix = env.sweep_fees_ix(&l, &caller.pubkey());
+    assert!(env.send(&[ix], &caller, &[]).is_err());
+
+    let m = env.send_ok(&[env.sweep_fees_components_ix(&l, &caller.pubkey(), &l.book[..POSITIONS_PER_TX])], &caller, &[]);
+    eprintln!("sweep_fees_components (8) CU: {}", m.compute_units_consumed);
+    let ix = env.sweep_fees_components_ix(&l, &caller.pubkey(), &l.book[7..8]);
+    env.send_expect_err(&[ix], &caller, &[], err(BasketError::DuplicateMint));
+    env.send_ok(&[env.sweep_fees_components_ix(&l, &caller.pubkey(), &l.book[POSITIONS_PER_TX..])], &caller, &[]);
+    assert!(env.account(&redemption_pda(&l.share_mint, &fee_vault)).is_none());
+    assert_eq!(l.basket_state(&env).pending_redeem_shares, 0);
+    assert_eq!(env.fee_vault(&l).unsettled_shares, 0);
+    for (i, mint) in l.mints.iter().enumerate() {
+        let expected = (vaults[i] as u128 * net as u128 / h as u128) as u64;
+        assert!(env.token_amount(&Env::ata(&fee_vault, mint)).abs_diff(expected) <= 1, "component {i}");
+    }
+    assert!(env.holder_shares(&l).abs_diff(h - net) <= 1);
 }
 
 #[test]
-fn creator_sol_is_held_back_while_it_would_leave_their_wallet_below_rent() {
+fn sweep_rejects_wrong_creator_or_team_wallet() {
     let mut env = Env::initialized();
-    let (l, s) = seeded(&mut env, 2, 5);
-    let creator = l.creator.pubkey();
-    assert_eq!(env.lamports(&creator), 0, "creator never funded a wallet");
-    let trader = env.fund(10 * LAMPORTS);
-    env.buy_shares(&l, &s, &trader, LAMPORTS / 2);
-    let sol_total = env.claim_pool_fees(&l, &s, &trader);
-    let b: Basket = env.load(&l.basket);
-    let (hl, cl, pl) = split(sol_total, &b.fees);
-    assert!(cl < 890_880, "test premise: creator line is below rent exemption");
-
-    // The sweep does not revert; the creator's SOL waits in the vault.
-    let caller = env.fund(LAMPORTS);
-    let treasury_before = env.lamports(&env.treasury.pubkey());
-    env.sweep_fees(&l, &caller);
-    assert_eq!(env.lamports(&creator), 0);
-    assert_eq!(env.lamports(&env.treasury.pubkey()) - treasury_before, pl);
-    let v = env.fee_vault(&l);
-    assert_eq!((v.creator_owed_lamports, v.swept_creator_lamports, v.holder_reserve_lamports), (cl, 0, hl));
-    assert_eq!(env.fee_vault_free_lamports(&l), hl + cl);
-    // Shares still go out: a token account has its own rent.
-    assert!(env.token_amount(&Env::ata(&creator, &l.share_mint)) > 0);
-
-    // Once the wallet exists the backlog is paid with the next sweep.
-    env.svm.airdrop(&creator, LAMPORTS).unwrap();
-    env.buy_shares(&l, &s, &trader, LAMPORTS / 10);
-    let more = env.claim_pool_fees(&l, &s, &trader);
-    let (_, cl2, _) = split(more, &b.fees);
-    env.sweep_fees(&l, &caller);
-    assert_eq!(env.lamports(&creator), LAMPORTS + cl + cl2);
-    let v = env.fee_vault(&l);
-    assert_eq!((v.creator_owed_lamports, v.swept_creator_lamports), (0, cl + cl2));
-}
-
-#[test]
-fn sweep_rejects_wrong_creator_or_treasury() {
-    let mut env = Env::initialized();
-    let (l, _s) = seeded(&mut env, 2, 4);
+    let (l, _) = env.launch_and_seed(2, 6);
     let caller = env.fund(LAMPORTS);
     let good = env.sweep_fees_ix(&l, &caller.pubkey());
     let stranger = Pubkey::new_unique();
 
     let mut ix = good.clone();
-    ix.accounts[6].pubkey = stranger; // creator
-    ix.accounts[7].pubkey = Env::ata(&stranger, &l.share_mint);
-    assert!(env.send(&[ix], &caller, &[]).is_err());
+    let idx = ix.accounts.iter().position(|m| m.pubkey == l.creator.pubkey()).unwrap();
+    ix.accounts[idx].pubkey = stranger;
+    ix.accounts[idx + 1].pubkey = Env::ata(&stranger, &l.share_mint);
+    env.send_expect_err(&[ix], &caller, &[], err(BasketError::Unauthorized));
 
     let mut ix = good.clone();
-    ix.accounts[8].pubkey = stranger; // treasury
-    ix.accounts[9].pubkey = Env::ata(&stranger, &l.share_mint);
-    assert!(env.send(&[ix], &caller, &[]).is_err());
+    let idx = ix.accounts.iter().position(|m| m.pubkey == env.config().team_wallet).unwrap();
+    ix.accounts[idx].pubkey = stranger;
+    env.send_expect_err(&[ix], &caller, &[], err(BasketError::Unauthorized));
+
+    // Anyone may sweep, paused or not.
+    env.set_paused(true);
+    env.sweep_fees(&l, &caller);
 }
