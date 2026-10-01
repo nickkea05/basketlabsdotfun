@@ -63,15 +63,23 @@ handler).
 
 ## 3. Sleeve and gate defaults by type
 
-| Type / mode         | Default `r` after step | Band   | Pool price range | Gate default        |
-| ------------------- | ---------------------- | ------ | ---------------- | ------------------- |
-| Fixed, majors/index | 7%                     | 5–10%  | `[0.5×, 8×]`     | Open                |
-| Mirror              | 10%                    | 5–15%  | `[0.5×, 8×]`     | Open                |
-| Strategy            | 12%                    | 8–20%  | `[0.5×, ∞)`      | Window → Closed     |
-| Managed             | 12%                    | 8–20%  | `[0.5×, ∞)`      | Window → Closed     |
-| Fixed, meme/sector  | 20%                    | 15–25% | full range       | Closed after window |
+> **Struck by the change order (2026-09-30).** The "Pool price range" and "Gate default"
+> columns and the D13 fee scheduler no longer apply. The pool is a Meteora DLMM with two
+> program-owned positions — `tight` (±8 / ±12 / ±15 % around the active bin, keeper
+> re-centred) and `backstop` (±40 / ±50 / ±70 %, whole bin arrays, ≤ 4) — with the bin
+> step, base fee and widths fixed per type in `Config.pools` (progress doc §6.4a). The
+> gate default for every type is `WindowUntil(now + 48 h)` then `Closed`; `Open` only
+> behind `Config.allow_open_gate`. The `r` column and bands still stand.
 
-Step phase for all: `r = 25%` until pool SOL ≥ 20 SOL. Pool swap fee: 1% meme/sector, 0.3% index/majors (fee scheduler on top for Window/Closed per D13). Creator picks within band in the signed payload; program enforces band.
+| Type / mode         | Default `r` after step | Band   | ~~Pool price range~~ | ~~Gate default~~        |
+| ------------------- | ---------------------- | ------ | -------------------- | ----------------------- |
+| Fixed, majors/index | 7%                     | 5–10%  | ~~`[0.5×, 8×]`~~     | ~~Open~~                |
+| Mirror              | 10%                    | 5–15%  | ~~`[0.5×, 8×]`~~     | ~~Open~~                |
+| Strategy            | 12%                    | 8–20%  | ~~`[0.5×, ∞)`~~      | ~~Window → Closed~~     |
+| Managed             | 12%                    | 8–20%  | ~~`[0.5×, ∞)`~~      | ~~Window → Closed~~     |
+| Fixed, meme/sector  | 20%                    | 15–25% | ~~full range~~       | ~~Closed after window~~ |
+
+Step phase for all: `r = 25%` until pool SOL ≥ 20 SOL. ~~Pool swap fee: 1% meme/sector, 0.3% index/majors (fee scheduler on top for Window/Closed per D13).~~ Pool base fee per type: 0.25 % index/majors (bin step 25), 0.5 % Mirror/Strategy/Managed (bin step 50), 1 % meme/sector (bin step 100); DLMM adds its dynamic fee on top, no scheduler. Creator picks `r` within band in the payload; program enforces band.
 
 ---
 

@@ -309,16 +309,32 @@ publicly (inputs + output) so it can be replayed against the pinned hash.
   program enforces at rebalance): min host position USD, min asset market cap,
   min hold time, min weight floor (dust), max single-asset weight, allow/deny
   mints.
-- **Lazy creation.** Nothing goes on-chain at "Launch". The creator signs the
-  payload (ed25519 message), we store it and list the basket as unfunded. The
-  **first buy** transaction creates the accounts and pays rent (~0.01–0.03 SOL
-  bundled into a buy that is already larger); the program verifies the
-  creator's signature over the payload so the buyer cannot alter it. The
-  creator therefore never needs SOL. Unfunded baskets expire off the list
-  after N days.
-- **Zero-supply close crank.** Keeper closes baskets with `supply == 0` and no
-  activity for 14 days, refunding rent to whoever paid. Baskets with holders
-  that go dead need a separate sunset path (post-launch).
+- ~~**Lazy creation.**~~ **Superseded by the change order (2026-09-30), as built:**
+  the deployer signs `create_basket` and pays. The launch transaction takes a
+  **1 SOL refundable deposit** onto the Basket account plus ≈ 0.034 SOL of
+  account rent, opens the basket's DLMM pool, and carries **at most 6
+  positions**; books of 7–20 finish with `add_positions` (8 per tx) before the
+  first buy. The deployer's wallet needs a **wSOL token account** before the
+  launch tx (create it in the same transaction, ahead of our instruction). The
+  **first buy** (`seed`, ≥ 1 SOL implied) pays the 0.1 SOL creation fee and
+  opens the `tight` liquidity position; the keeper places and funds the
+  `backstop` within the first minute. The deposit pays the pool's and the bin
+  arrays' rent, which Meteora never refunds: **pool 0.035 + 2 tight arrays
+  0.143 (+ up to 2 more backstop arrays 0.143) SOL**. Launch screen copy:
+  "1 SOL deposit, **≈ 0.76–0.9 SOL returned when the basket closes**" (measured
+  0.905 without / 0.758 with a 4-array backstop, account rents included).
+  Optional keeper-signed **tier attestation** `(creator, tier, expiry_slot)`
+  rides along as an argument; missing or expired → base tier.
+- **Mint path budget.** One-click `mint` handles **≤ 8 components** once the
+  backstop is live (9 fits only before the backstop is placed — 64 account
+  locks); `redeem` single-tx also ≤ 8 with a live backstop, larger books use
+  `redeem_begin` + `redeem_components`. Mint CU ≈ 0.55–1.05M, redeem 0.35–0.65M:
+  always set a compute-unit limit of 1.4M.
+- **Zero-supply close crank.** Keeper closes baskets once every holder has
+  redeemed (fee shares swept, creator's cut redeemed), the backstop is wound
+  down, and nothing happened for 14 days: `close_positions` → `close_basket`
+  (deposit − spent rent + account rents back to the deployer) → `close_fee_vault`.
+  Baskets with holders that go dead need a separate sunset path (post-launch).
 - **No first-buyer edge.** Minting at NAV means snipers have no reason to
   fund launches; do not design around bot liquidity.
 - **Managed baskets** need visible rules buyers can read before buying:

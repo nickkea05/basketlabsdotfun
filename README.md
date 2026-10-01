@@ -2,9 +2,10 @@
 
 A Solana launchpad for basket tokens. A basket is a share mint backed by a
 program-owned vault of components plus a small SOL/share liquidity sleeve on
-Meteora DLMM (two vault-owned positions: a keeper-recentered `tight` and a wide
-`backstop`; migrating from DAMM v2 per `docs/change-order-liquidity-and-fees.md`).
-Shares mint and redeem at NAV, pro rata against the vault.
+Meteora DLMM: two basket-owned positions, a keeper-recentered `tight` band around
+the active bin and a wide `backstop` that always keeps the pool quoting
+(`docs/change-order-liquidity-and-fees.md`). Shares mint and redeem at NAV, pro
+rata against the vault; redeem is never gated.
 
 Three basket types:
 
@@ -14,12 +15,21 @@ Three basket types:
 - **Managed** — the creator rebalances under a timelock and turnover cap that buyers
   can read before they buy.
 
-Status: pre-launch. The web app runs against mock data. The Anchor program has
-every instruction of the original spec implemented with LiteSVM tests (85 green,
-including a DLMM spike against the mainnet binary). The 2026-09-30 change order
-(DLMM liquidity, deployer deposit, fee split, no holder rewards) is planned in
-`docs/program-progress.md` §6 and not yet applied; the program has not been
-deployed to devnet, reviewed, or audited. Nothing here should touch real money.
+Status: pre-launch. The web app runs against mock data. The Anchor program
+implements the spec as amended by the 2026-09-30 change order (DLMM liquidity,
+deployer-signed create with a 1 SOL refundable deposit, 20/50/25/5 fee split,
+buyback and prize vaults, keeper backstop/recenter instructions, no holder
+rewards) with 115 LiteSVM tests green against the mainnet DLMM binary. A handful
+of build-time decisions the change order did not cover are listed in
+`docs/program-progress.md` §6.5 for sign-off. The program has not been deployed
+to devnet, reviewed, or audited. Nothing here should touch real money.
+
+Budgets that shape the UI (measured, `docs/program-progress.md` §4): launch tx
+carries ≤ 6 positions (`add_positions` 8 per tx after); one-transaction `mint`
+and `redeem` handle ≤ 8 components once the backstop is live (bigger books use
+the two-step redeem); every instruction fits 1.4M CU; the pool and its bin
+arrays (0.035 + 0.071 SOL each) are the only rent Meteora never refunds, so a
+deployer gets ≈ 0.76–0.9 SOL of the 1 SOL deposit back at close.
 
 ## Layout
 
@@ -59,9 +69,9 @@ npm run lint
 Program (Anchor 1.2.0, Solana CLI 4.3.0, Rust 1.96.1 — see `programs/README.md`):
 
 ```
-.\scripts\fetch-fixtures.ps1     # once: dumps DLMM, cp-amm + token metadata .so files
+.\scripts\fetch-fixtures.ps1     # once: dumps DLMM, token metadata (+ legacy cp-amm) .so files
 anchor build
-cargo test -p basket -- --test-threads=1
+cargo test -p basket
 ```
 
 Tests run in-process on LiteSVM; no validator is needed. The program keypair in
@@ -74,7 +84,7 @@ Tests run in-process on LiteSVM; no validator is needed. The program keypair in
 - Anything that works in the demo but would fail with real traffic or real money
   gets a line in `docs/TODO.md` the moment it is noticed.
 - Open design questions are asked, not decided; they are collected in
-  `docs/program-progress.md` §5.
+  `docs/program-progress.md` §5 / §6.4 (answered) and §6.5 (awaiting sign-off).
 
 ## License
 

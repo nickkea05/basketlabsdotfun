@@ -6,8 +6,10 @@ Living log for the `basket` Anchor program build. Spec is
 the build: tests written before handlers, LiteSVM, one test file per instruction, and
 any design question the spec leaves open gets **asked, not decided** (§6 below).
 
-Last updated: 2026-09-30 (change order received; DLMM facts verified, migration plan
-and open questions in §6; **no program code changed yet**).
+Last updated: 2026-09-30, late (change order **built**: §6.3 steps 1–11 done, all
+tests green on the DLMM fixture, `anchor build` exit 0, pushed `858434b`). §3b is the
+"as built" for the change order, §4 the re-measured budgets, **§6.5 the decisions I had
+to take that the change order does not cover — read that first.**
 
 ---
 
@@ -23,14 +25,15 @@ and open questions in §6; **no program code changed yet**).
 | 5 | `crystallize` + HWM, management fee (gates/schedules already enforced in mint) | done, green (`9b952a4`) |
 | 6 | `submit_book` / `open_position` / `apply_book` / `execute_swap` / `close_position` / `finalize_rebalance` | done, green (`ccf2364`) |
 | 7 | `post_rewards_root` / `distribute_rewards` / `close_rewards_root`, `lock_creator_shares` / `unlock_creator_shares`, `close_positions` / `close_basket` (pause/admin were done in phase 1) | done, green (`1922db4`) |
-| 7b | **Change order** (DAMM v2 → DLMM two positions, deployer-signed create + deposit, fee split 20/50/25/5, rewards removed, Window→Closed default, prize pool) | plan in §6; blocked on §6.4 answers |
-| 8 | Devnet: deploy, CU measurements on a real validator, batch UX end to end, indexer event coverage | not started (after 7b) |
+| 7b | **Change order** (DAMM v2 → DLMM `tight` + `backstop`, deployer-signed create + 1 SOL deposit, fee split 20/50/25/5, rewards removed, Window→Closed default, buyback + prize vaults, keeper ixs) | done, green (`858434b`); §3b, §6.5 |
+| 8 | Devnet: deploy, CU measurements on a real validator, batch UX end to end, indexer event coverage | not started — after Nick signs off §6.5 |
 | wrap | README/TODO refresh, present §5 to Nick | done; §5 answered 2026-09-30 |
 
-Last green run: **85/85** — unit 8, add_positions 4, apply_book 3, claim_pool_fees 3,
-close_basket 3, create_basket 6, creator_lock 2, crystallize 6, dlmm_spike 1,
-execute_swap 4, finalize_rebalance 4, initialize_config 6, mint 6, redeem 6,
-rewards 3, seed 5, smoke 2, submit_book 5, sweep_fees 5, update_whitelist 3.
+Last green run: **115/115** in 24 files — unit 7, add_positions 6, apply_book 3,
+backstop 6, buyback 3, claim_pool_fees 6, close_basket 4, create_basket 9,
+creator_lock 2, crystallize 6, dlmm_spike 1, execute_swap 4, finalize_rebalance 4,
+initialize_config 8, mint 9, prizes 3, recenter_tight 4, redeem 8, seed 5,
+settle_fees 2, smoke 2, submit_book 5, sweep_fees 5, update_whitelist 3.
 
 ## 2. Restart checklist
 
@@ -38,17 +41,22 @@ From `c:\dev\ponsclone\basketfun`:
 
 1. Move stale test exes out of the way (McAfee holds them → `LNK1104`):
    `Get-ChildItem target\debug\deps\*.exe | Move-Item -Destination $env:TEMP\stale -Force`
-2. `anchor build` — if the IDL step fails with a link error, repeat step 1 and rerun.
-3. `cargo.exe test -p basket --no-fail-fast -- --test-threads=1` (always `cargo.exe`:
-   a stray 0-byte `C:\Windows\system32\cargo` triggers an "open with" popup).
-4. Fixtures: `.\scripts\fetch-fixtures.ps1` now also dumps `lb_clmm.so` (DLMM).
-   The DLMM IDL is `idls/lb_clmm.json` (dlmm-sdk `idls/dlmm.json`, program v0.12.0;
-   the on-chain IDL account does not exist, `anchor idl fetch` fails).
-5. Next up: get Nick's answers on **§6.4**, then execute §6.3 in order, then Phase 8
-   (devnet). Devnet needs a program keypair outside the repo, `anchor keys sync`,
-   Meteora DLMM on devnet (same program id as mainnet) + Jupiter (no devnet
-   deployment — rebalance tests there use the DLMM venue path as LiteSVM does), and
-   the TS client in `packages/solana` generated from the IDL.
+2. `anchor build` — exit 0 only once every file in `tests/` compiles (the IDL step
+   builds them). If it fails with a link error, repeat step 1 and rerun.
+3. `cargo.exe test -p basket` (always `cargo.exe`: a stray 0-byte
+   `C:\Windows\system32\cargo` triggers an "open with" popup). Tests pass in
+   parallel; a full run is ~70 s.
+4. Fixtures: `.\scripts\fetch-fixtures.ps1` dumps `mpl_token_metadata.so` and
+   `lb_clmm.so` (DLMM). The DLMM IDL is `idls/lb_clmm.json` (dlmm-sdk
+   `idls/dlmm.json`, program v0.12.0; the on-chain IDL account does not exist,
+   `anchor idl fetch` fails).
+5. PowerShell 5.1 gotcha: `Set-Content -Encoding utf8` writes a BOM and rustc rejects
+   it; write files with `[System.IO.File]::WriteAllText(path, text, UTF8Encoding $false)`.
+6. Next up: Nick confirms or overturns **§6.5**, then Phase 8 (devnet). Devnet needs
+   a program keypair outside the repo, `anchor keys sync`, Meteora DLMM on devnet
+   (same program id as mainnet) + Jupiter (no devnet deployment — rebalance tests
+   there use the DLMM venue path as LiteSVM does), and the TS client in
+   `packages/solana` generated from the IDL.
 
 ## 3. Design as built (phases 3–6)
 
@@ -156,30 +164,111 @@ From `c:\dev\ponsclone\basketfun`:
   happen **after the last CPI** in the instruction, or the CPI boundary check
   reports `UnbalancedInstruction`.
 
-## 4. Measurements and hard limits (keep in README)
+## 3b. Change order as built (Phase 7b) — supersedes §3 where they differ
 
-- Mainnet **64 account-lock limit**: single-tx `seed` N ≤ 9 (26 fixed + 4N), `mint`
-  N ≤ 10 (23 fixed + 4N). N=10 seed → `TooManyAccountLocks` (tested).
-- **Instruction trace limit 64** → ≤ 8 positions per `create_basket` /
-  `add_positions` tx (`POSITIONS_PER_TX = 8`); harness chunks automatically.
-- Default 200k CU is not enough anywhere with CPI; tests request 1.4M.
-- create_basket(6) 281k CU; add_positions(7) 240k (~34k/position).
-- seed N=2/5/8/9: 34/46/58/62 accounts, 269k/331k/323k/362k CU; rent+fees ≈ 0.032 SOL
-  paid by the first buyer.
-- mint N=2/5/8/9: 30/42/54/58 accounts, 121k/134k/149k/164k CU.
-- redeem N=2/5/8/9: 30/42/54/58 accounts, 118k/151k/160k/169k CU; redeem_begin 124k;
-  redeem_components(5) 52k.
-- claim_pool_fees ≈ 80–85k; sweep_fees small; crystallize 47k.
-- submit_book (1 new position) 51k; apply_book 44k; execute_swap (cp-amm inner) 38k;
-  finalize_rebalance(3) 19k.
-- post_rewards_root 20k; distribute_rewards (shares, ATA created) 37k;
-  lock_creator_shares 43k; unlock 20k; close_positions(2) 73k; close_basket (seeded,
-  3 cp-amm CPIs) 144k; close_basket (unseeded) 23k.
-- Meteora cp-amm: creator = basket PDA (owns position NFT), payer = buyer; base fee
-  layout is PodAlignedFeeTimeScheduler; scheduler ≤ 1 day; protocol takes 20% of swap
-  fees before our split.
-- Sleeve geometry: SOL leg `B = r·D` is primary, pool price = NAV; share side follows
-  the range (≈2.207× nominal for Bounded [0.5×, 8×], 3.414× FloorOnly, 1× Full).
+Everything cp-amm in §3 (position NFT, `OnlyB`, 40/30/30, holder rewards,
+`holder_reserve_*`, creator-signature replay path) is gone. What stands:
+
+- **Pool.** One DLMM pool per basket, `share_mint` = X, wSOL = Y, created in
+  `create_basket` (`initialize_customizable_permissionless_lb_pair2`, funder = basket
+  PDA, `collect_fee_mode = OnlyY`, preset by `PROFILE_*` from `Config.pools`). Pool rent
+  (0.0346 SOL) is spent from the deployer's **1 SOL deposit** right there
+  (`deposit_lamports` / `deposit_spent_lamports`, `DepositSpent` events).
+- **Two positions**, both PDAs owned by the basket (`initialize_position_pda`, seeds
+  `["position", lb_pair, basket, lower, width]`):
+  - `tight` = `[active − w, active + w]` (index preset w = 31 → 63 bins, one position);
+    opened in `seed` from the first buy, bin arrays (2 × 0.0714 SOL) paid by the buyer
+    and reimbursed from the deposit. Re-centred by the keeper (`recenter_tight`).
+  - `backstop` = whole bin arrays around the launch bin (≤ 4), one position created
+    70 wide and grown one bin array per `fund_backstop` (DLMM caps realloc at ~10 KB
+    per tx). Placed by the keeper (`place_backstop`: creates the position, reserves
+    the arrays, rent from the deposit), funded in **ascending array order**
+    (`fund_backstop(array_index)`, moves the idle 20 % slice of the sleeve into the
+    array's bins, keeper pays the position growth rent — refundable), then `LIVE`.
+    `withdraw_backstop(array_index)` is allowed when the active bin is outside the
+    backstop range (reset) or when the gate is closed and the basket has been idle
+    `close_idle_s` (wind-down); `close_backstop` once empty; `place_backstop` again
+    re-places around the current active bin. States: `UNPLACED → FUNDING → LIVE →
+    WITHDRAWING → CLOSED (→ FUNDING …)`.
+- **Sleeve accounting.** `holder_shares H = supply − shares in tight − shares in
+  backstop − idle shares + pending_redeem_shares` (bin amounts from the position's
+  liquidity shares over the bin arrays passed in). Mint: 80 % of the sleeve into
+  `tight`, 20 % into the backstop **only if the backstop is LIVE, contains the active
+  bin, and the active bin is inside tight** — then as a 35-bin top-up around the
+  active bin inside tight's own bin arrays (CU/lock budget); otherwise the 20 % stays
+  idle on the basket ATAs and `fund_backstop`/`recenter_tight` pick it up. Redeem:
+  `remove_liquidity_by_range2(bps = ⌊net·10⁴/H⌋)` on tight only, shortfall from idle
+  SOL, components `vault·net/H`; never gated; **`h = max(h, net)`** so the last
+  holder's full redeem cannot fail on bin-share rounding (§6.5).
+- **Keeper loop.** `recenter_tight`: allowed when the active bin is out of tight, or
+  past 70 % of the half-width **and** ≥ 300 s since `last_recenter_ts` (set at seed);
+  removes all of tight, closes the position, opens `[active − w, active + w]`, adds
+  the withdrawn amounts (+ idle only while the backstop is LIVE), and while the mint
+  gate is open mints treasury shares at the active-bin price to rebuild the ask side
+  up to the target X. Position rent round-trips through the keeper. `reset_backstop`
+  = `withdraw_backstop` × arrays + `close_backstop` + `place_backstop` + `fund_backstop`
+  × arrays (keeper-side confirm count).
+- **Fees.** `claim_pool_fees(position, min_bin, max_bin)` (anyone, either position,
+  backstop one array at a time): wSOL → native SOL on the FeeVault, routed creator /
+  BUYBACK / team / PRIZE (creator = `basket.fees.creator_split_bps` from the attested
+  tier, the other three share the rest 50/25/5), `creator_owed_lamports` held back
+  when the wallet is not rent-safe, `unrouted_lamports` for SOL the keeper parks
+  (recenter claims). Per-basket epoch counters `fee_epoch / fee_epoch_lamports /
+  fee_prev_epoch_lamports` for prizes. `sweep_fees` (anyone): creator 20 % of the fee
+  shares transferred as shares; 80 % burned and redeemed in kind (tight + idle SOL
+  leg routed 3 ways at once, components into FeeVault ATAs via a `Redemption` PDA
+  and `sweep_fees_components` chunks). `settle_fees(amount_in, min_out, data)`
+  (keeper): venue swap of one FeeVault component ATA → wSOL → routed 3 ways.
+- **Treasury vaults.** `init_treasury_vaults` (admin, once): `BuybackVault ["buyback"]`,
+  `PrizeVault ["prize"]`. `set_bskt_mint` once. `stage_buyback(lamports)` moves PDA SOL
+  onto ATA(vault, wSOL); `execute_buyback` syncs, venue-swaps to $BSKT, burns the
+  whole ATA. `post_prize_payout(epoch, total)` with `[wallet, lock, basket]` triplets.
+- **create_basket.** Deployer signs and pays; optional keeper ed25519 `TierAttestation`
+  `(creator, tier, expiry_slot)`; ≤ 6 positions in the launch tx (DLMM pool init eats
+  the trace budget), rest via `add_positions` (8 per tx). `payer_wsol_ata` must exist
+  (the frontend creates it; the program only tops it up by 1 lamport). Gate default
+  `WindowUntil(now + 48 h)`, bounds 24–72 h, `Open` only behind `allow_open_gate`.
+- **Close.** `close_positions` → `close_basket` (tight withdrawn, fees claimed,
+  position closed, shares burned, SOL dust to the treasury, FeeVault creator line paid,
+  Basket closed: payer gets rent + `deposit − spent`) → `close_fee_vault` once the
+  keeper has settled the FeeVault's component ATAs. Backstop must be `UNPLACED` or
+  `CLOSED` first (wind-down path above). The fee shares count as outstanding: sweep,
+  then the creator redeems their cut (the harness loops redeem/sweep until nothing
+  is left — three rounds in practice).
+
+## 4. Measurements and hard limits (keep in README) — DLMM build, LiteSVM
+
+- **64 account-lock limit (incl. program ids).** `mint` N ≤ 8 while the backstop is
+  LIVE (N = 9 → 65 locks, `TooManyAccountLocks`, tested); N = 9 is fine before the
+  backstop is placed. `seed` N ≤ 9. `redeem` N = 8 with a live backstop = 58 accounts.
+  No program-side book cap: bigger books use `redeem_begin/components` and the keeper
+  places the backstop after the first buys (§6.5 j).
+- **Instruction trace limit 64.** `create_basket` ≤ 6 positions
+  (`CREATE_BASKET_POSITIONS`), `add_positions` 8 (`POSITIONS_PER_TX`).
+- Tests request 1.4M CU; everything below fits one transaction.
+- create_basket (2–6 positions) 230–405k CU; add_positions(8) 250k.
+- seed ≈ 950–980k (pool position + 2 bin arrays ≈ 200–255k each).
+- mint 520–565k; with a live backstop and the 35-bin top-up ≈ 1.04M (N = 8); active
+  bin outside tight (no top-up) ≈ 977k.
+- redeem 330–390k; with a live backstop 595–650k (reads 6 bin arrays);
+  redeem_begin 320k, redeem_components(5) ≈ 70k.
+- place_backstop ≈ 540k (position + up to 2 new bin arrays); fund_backstop per array
+  178k / 214k / 632k / 593k (share-side arrays cost more); withdraw_backstop per array
+  356–487k; close_backstop ≈ 86k; recenter_tight 752–850k.
+- claim_pool_fees tight (63 bins) ≈ 165–174k; backstop per array 150–205k.
+- sweep_fees 355–360k; sweep_fees_components(8) 252k; settle_fees ≈ 104k.
+- execute_buyback ≈ 86k; post_prize_payout(2) 28k; crystallize 40k; apply_book 45k.
+- close_positions(2) 35k; close_basket (seeded) 136k; close_basket (unseeded) 21k.
+- **Rent.** Pool 34,646,880 lamports (never closable); bin array 71,437,440 each
+  (never closable); position 57,406,080 + growth (refundable). Deposit spent at
+  launch with the index preset: pool + 2 tight arrays = **177.5M lamports**; with a
+  4-array backstop sharing tight's two arrays = **320.4M**. Measured refunds at close:
+  **0.905 SOL** (no backstop) / **0.758 SOL** (backstop), rents included.
+- Pool swap fee on the index preset ≈ base 0.25 % + dynamic ≈ 0.4 % per side; Meteora
+  keeps 20 % before our split.
+- JIT guard: a position cannot remove from the active bin in the second it added
+  there (`LiquidityLocked` 6055); the harness steps the clock 1 s after seed / mint /
+  fund_backstop. A redeem landing in the same slot as a mint retries next slot.
 
 ## 5. Open design questions (historical — answered 2026-09-30)
 
@@ -372,6 +461,9 @@ bins ≈ 8 %); bin step 200 halves the array cost but doubles the tick.
 
 ### 6.3 Migration plan (order of work; each step = tests first, then handler, commit)
 
+**Status: all 11 steps done** (commits `2c0152b` → `858434b`). The list below is the
+plan as written; where the build diverged, §3b is what exists and §6.5 says why.
+
 1. **Spike — done** (`src/dlmm.rs`, `tests/common/dlmm.rs`, `tests/dlmm_spike.rs`,
    §6.1b). Re-centering will be remove (121k) → `close_position2` (8k) →
    `initialize_position_pda` (14k) → add (130k) ≈ 275k CU in one instruction; no
@@ -483,6 +575,69 @@ bins ≈ 8 %); bin step 200 halves the array cost but doubles the tick.
   only the creator-signature / replay path. Tier → creator bps table lives in Config
   (defaults all 2000 until Nick sets the ladder — **still open: values and which
   line funds the bump**).
+
+### 6.5 Decisions taken during the build that the change order / §6.4a do not cover
+
+Rule of the build is "ask, don't decide"; these came up mid-step where stopping would
+have left the program half-migrated, so each was taken the conservative way, tested,
+and is listed here for Nick to confirm or overturn. Program-side each is a small change.
+
+a. **`settle_fees` is keeper-only.** Q1 said "permissionless". It re-issues an
+   arbitrary inner instruction with the FeeVault PDA as signer against an allow-listed
+   venue; permissionless would let anyone pick the route and the slippage floor for
+   our fee SOL. Guards (`UnexpectedAccountInSwap`, `min_amount_out`, venue allow-list)
+   are the same as `execute_swap`. Flip = one `require!`.
+b. **Pool fees claimed inside `close_basket` go to the treasury un-routed** (they are
+   dust by then: the keeper claims right before close).
+c. **Any remaining holder blocks `close_basket`** (`H ≤ 10` base units), including
+   the FeeVault's own fee shares — so the close path is sweep → creator redeems → close.
+d. **D13 launch fee scheduler dropped** (DLMM customizable pools have no scheduler).
+   Creation fee 0.1 SOL kept, to the treasury at seed.
+e. **Managed baskets use the Mirror/Strategy pool preset** (not named in the table).
+f. **Per-mint backstop top-up is 35 bins around the active bin, inside tight's bin
+   arrays, only while the backstop is LIVE and the active bin is inside tight.** The
+   change order's "20 % of every mint into the existing backstop position" over the
+   full 4-array range costs 1.25–1.4M CU and 2 extra account locks → does not fit a
+   mint transaction. The 20 % slice still reaches the backstop (same position, same
+   bins it already covers), just concentrated. When the active bin is outside tight
+   the slice stays idle and `fund_backstop` / `recenter_tight` sweep it in.
+g. **Mint single-tx cap N ≤ 8 once the backstop is live** (N = 9 needs 65 locks).
+   N = 9 works before the backstop is placed; the frontend brief should say "≤ 8
+   components for one-click mint, 9+ use the two-step path" or we cap books at 8.
+h. **Backstop funding goes in ascending bin-array order, one array per transaction,**
+   growing the position each time (DLMM `InvalidRealloc` above ~10 KB per tx). Keeper
+   pays the growth rent (0.0008 SOL/bin, refunded at close).
+i. **`recenter_tight` leaves idle SOL/shares alone unless the backstop is LIVE** —
+   while UNPLACED / FUNDING / CLOSED the idle balance is the backstop's slice and
+   must not be swept into tight.
+j. **No program-side cap on book size**; the budgets in §4 are enforced by the client
+   (two-step redeem, backstop placed after first buys for 9+ books).
+k. **Recenter interval counts from `seed`** (`last_recenter_ts` = seed time): the first
+   70 %-triggered re-centre is ≥ 5 min after launch; out-of-range always allowed.
+l. **Creator tier ladder defaults to 2000 bps for every tier** until Nick sets values
+   (Q10 still open: the ladder and which line funds the bump — today the other three
+   lines shrink pro rata).
+m. **Redeem clamps `h = max(h, net)`.** Bin-share → amount conversion undercounts a
+   position by up to ~31 base units, so `H` can land below the last holder's balance
+   and the final redeem would fail by a few units. With the clamp the last holder
+   gets everything that is left. Same clamp in `sweep_fees` / `sweep_fees_components`.
+n. **Close crank checks the backstop state before loading the pool view**, so a live
+   backstop fails with `BackstopState` instead of `PositionMismatch`.
+o. **Prize epoch 0 starts at `initialize_config`** (`epoch_anchor_ts = now`, as the
+   struct doc already said; the handler had left it at 0).
+p. **`close_fee_vault` does not check the FeeVault's component ATAs** are empty —
+   they are regular ATAs the keeper settles with `settle_fees`; closing early strands
+   nothing on-chain but leaves tokens in ATAs nobody can sign for anymore. Keeper
+   ops: settle before close (could be enforced by passing the ATAs).
+q. **Transient failures to expect on mainnet:** a `redeem` in the same slot as a
+   `mint`, or `withdraw_backstop` in the same slot as `fund_backstop`, fails with
+   DLMM `LiquidityLocked` (JIT guard) — retry next slot. Keeper eats bin-array rent
+   when the deposit is exhausted (`spend_deposit` pays what it can — untested path).
+r. **`payer_wsol_ata` must exist before `create_basket`** (the launch tx is at the
+   trace limit); the frontend creates it in the same transaction, before our ix.
+s. **Launch economics for the frontend brief §6:** launch tx ≈ deposit 1 SOL + ~0.034
+   SOL rents/fees + 0.1 SOL creation fee at seed; `≈ 0.76–0.9 SOL` comes back at
+   close (deposit minus pool + bin-array rent, plus account rents), not "≈ 0.6".
 
 ### 6.4 Open questions (asked 2026-09-30; answered in 6.4a — kept for the reasoning)
 
