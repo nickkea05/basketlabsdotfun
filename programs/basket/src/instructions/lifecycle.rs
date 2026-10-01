@@ -286,6 +286,9 @@ fn load_view_if_seeded<'a, 'info>(
 pub fn handle_close_positions<'info>(ctx: Context<'info, ClosePositions<'info>>, count: u16) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(ctx.accounts.config.is_keeper(ctx.accounts.keeper.key), BasketError::Unauthorized);
+    // Before the pool view: a backstop with liquidity needs its position in
+    // the view, and the close crank does not carry it.
+    require!(matches!(ctx.accounts.basket.backstop_state, BACKSTOP_UNPLACED | BACKSTOP_CLOSED), BasketError::BackstopState);
     let n = count as usize;
     require!(n >= 1 && ctx.remaining_accounts.len() >= n * 4, BasketError::ComponentCountMismatch);
     let (groups, tail) = ctx.remaining_accounts.split_at(n * 4);
@@ -444,6 +447,7 @@ pub struct CloseBasket<'info> {
 pub fn handle_close_basket<'info>(ctx: Context<'info, CloseBasket<'info>>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(ctx.accounts.config.is_keeper(ctx.accounts.keeper.key), BasketError::Unauthorized);
+    require!(matches!(ctx.accounts.basket.backstop_state, BACKSTOP_UNPLACED | BACKSTOP_CLOSED), BasketError::BackstopState);
     let lb_pair = ctx.accounts.lb_pair.to_account_info();
     let tight = ctx.accounts.tight_position.to_account_info();
     let view = load_view_if_seeded(&ctx.accounts.basket, &ctx.accounts.basket.key(), &lb_pair, &tight, ctx.remaining_accounts)?;

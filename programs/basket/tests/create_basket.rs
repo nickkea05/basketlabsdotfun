@@ -187,7 +187,7 @@ fn tier_attestation_sets_the_creator_line() {
     let bk = book(&mints, &equal_weights(2));
     let payer = env.new_deployer();
     let mut nonce = 10;
-    let mut args_for = |env: &Env, nonce: u64| fixed_args(nonce, &bk, env.now());
+    let args_for = |env: &Env, nonce: u64| fixed_args(nonce, &bk, env.now());
 
     // Expired attestation: accepted, tier 0.
     let a = args_for(&env, nonce);

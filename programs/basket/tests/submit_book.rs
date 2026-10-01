@@ -164,7 +164,7 @@ fn book_validation() {
 #[test]
 fn mint_is_blocked_during_a_rebalance_but_redeem_is_not() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_mirror(&mut env, 2, 6);
+    let (l, _s) = seeded_mirror(&mut env, 2, 6);
     let keeper = env.keeper.insecure_clone();
     let target = book(&[l.mints[0], l.mints[1]], &[7_000, 3_000]);
     env.submit_book(&l, &keeper, &target, &[]);
@@ -172,10 +172,10 @@ fn mint_is_blocked_during_a_rebalance_but_redeem_is_not() {
     let buyer = env.fund(10 * LAMPORTS);
     let deposits = vec![100_000_000u64; 2];
     env.fund_components_for(&buyer.pubkey(), &l, &deposits);
-    let ix = env.mint_ix(&l, &s, &buyer.pubkey(), &deposits, 0, u64::MAX);
+    let ix = env.mint_ix(&l, &buyer.pubkey(), &deposits, 0, u64::MAX);
     env.send_expect_err(&[ix], &buyer, &[], err(BasketError::RebalanceActive));
 
     let holder = l.payer.insecure_clone();
     let shares = env.token_amount(&Env::ata(&holder.pubkey(), &l.share_mint)) / 4;
-    env.redeem(&l, &s, &holder, shares);
+    env.redeem(&l, &holder, shares);
 }

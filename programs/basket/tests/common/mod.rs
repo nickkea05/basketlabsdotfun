@@ -5,7 +5,7 @@
 //! `scripts/fetch-fixtures.ps1`), and provides small helpers for keypairs,
 //! SPL mints/ATAs, Anchor instruction building and the ed25519 precompile.
 
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 pub mod ed25519_stub;
 pub mod books;

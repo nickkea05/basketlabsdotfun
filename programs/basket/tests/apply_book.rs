@@ -23,7 +23,7 @@ fn seeded_managed(env: &mut Env, nonce: u64) -> (Launched, SeededBasket) {
 #[test]
 fn applies_after_the_timelock_and_accounts_turnover() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_managed(&mut env, 1);
+    let (l, _s) = seeded_managed(&mut env, 1);
     let creator = l.creator.insecure_clone();
     // Equal thirds → 50/30/20: turnover = (|50−33.33| + |30−33.33| + |20−33.33|)/2 ≈ 16.67%.
     let target = book(&[l.mints[0], l.mints[1], l.mints[2]], &[5_000, 3_000, 2_000]);
@@ -33,17 +33,19 @@ fn applies_after_the_timelock_and_accounts_turnover() {
 
     let anyone = env.fund(LAMPORTS);
     // Too early.
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &l.book);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &l.book);
     env.send_expect_err(&[ix], &anyone, &[], err(BasketError::TimelockActive));
     env.warp(DEFAULT_MANAGED_TIMELOCK_S);
     // Wrong current book.
     let wrong = book(&[l.mints[0], l.mints[1], l.mints[2]], &[3_400, 3_300, 3_300]);
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &wrong);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &wrong);
     env.send_expect_err(&[ix], &anyone, &[], err(BasketError::BookHashMismatch));
 
     let creator_ata = Env::ata(&creator.pubkey(), &l.share_mint);
-    let q = env.crystallize_quote(&l, &s, 1); // only the mgmt part is used
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &l.book);
+    // The creator is the deployer and holds the seed shares already.
+    let creator_before = env.token_amount(&creator_ata);
+    let q = env.crystallize_quote(&l, 1); // only the mgmt part is used
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &l.book);
     let m = env.send_ok(&[ix], &anyone, &[]);
     println!("apply_book CU: {}", m.compute_units_consumed);
 
@@ -55,7 +57,7 @@ fn applies_after_the_timelock_and_accounts_turnover() {
     assert_eq!(b.rebalance.turnover_used_bps, expected_turnover);
     assert_eq!(b.rebalance.turnover_window_start_ts, env.now());
     assert_eq!(b.last_mgmt_accrual_ts, env.now());
-    assert_eq!(env.token_amount(&creator_ata), q.mgmt_shares, "management fee accrued");
+    assert_eq!(env.token_amount(&creator_ata) - creator_before, q.mgmt_shares, "management fee accrued");
     assert!(q.mgmt_shares > 0);
     // The pending book stays as the rebalance target (finalize needs it).
     let pb: PendingBook = env.load(&pending_book_pda(&l.share_mint));
@@ -65,7 +67,7 @@ fn applies_after_the_timelock_and_accounts_turnover() {
 #[test]
 fn turnover_cap_is_enforced_per_window() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_managed(&mut env, 2);
+    let (l, _s) = seeded_managed(&mut env, 2);
     let creator = l.creator.insecure_clone();
     let anyone = env.fund(LAMPORTS);
 
@@ -74,7 +76,7 @@ fn turnover_cap_is_enforced_per_window() {
     assert!(turnover_bps(&l.book, &all_in) > DEFAULT_TURNOVER_CAP_BPS);
     env.submit_book(&l, &creator, &all_in, &[]);
     env.warp(DEFAULT_MANAGED_TIMELOCK_S);
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &l.book);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &l.book);
     env.send_expect_err(&[ix], &anyone, &[], err(BasketError::TurnoverExceeded));
 
     // Two 20% moves in one window: the second breaks the cap.
@@ -83,7 +85,7 @@ fn turnover_cap_is_enforced_per_window() {
     assert!(t1 > 1_900 && t1 <= 2_100, "{t1}");
     env.submit_book(&l, &creator, &step1, &[]);
     env.warp(DEFAULT_MANAGED_TIMELOCK_S);
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &l.book);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &l.book);
     env.send_ok(&[ix], &anyone, &[]);
     // Finish this rebalance (no swaps needed for the test: weights only).
     env.finish_rebalance(&l, &step1, &[]);
@@ -95,12 +97,12 @@ fn turnover_cap_is_enforced_per_window() {
     assert!(t1 + t2 > DEFAULT_TURNOVER_CAP_BPS);
     env.submit_book(&l, &creator, &step2, &[]);
     env.warp(DEFAULT_MANAGED_TIMELOCK_S);
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &step1);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &step1);
     env.send_expect_err(&[ix], &anyone, &[], err(BasketError::TurnoverExceeded));
 
     // A new window resets the budget.
     env.warp(DEFAULT_TURNOVER_WINDOW_S);
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &step1);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &step1);
     env.send_ok(&[ix], &anyone, &[]);
     let b: Basket = env.load(&l.basket);
     assert_eq!(b.rebalance.turnover_used_bps, t2);
@@ -109,29 +111,29 @@ fn turnover_cap_is_enforced_per_window() {
 #[test]
 fn apply_is_managed_only_and_respects_pause() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_managed(&mut env, 3);
+    let (l, _s) = seeded_managed(&mut env, 3);
     let creator = l.creator.insecure_clone();
     let anyone = env.fund(LAMPORTS);
     let target = book(&[l.mints[0], l.mints[1], l.mints[2]], &[4_000, 4_000, 2_000]);
     env.submit_book(&l, &creator, &target, &[]);
     env.warp(DEFAULT_MANAGED_TIMELOCK_S);
     env.set_paused(true);
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &l.book);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &l.book);
     env.send_expect_err(&[ix], &anyone, &[], err(BasketError::Paused));
     env.set_paused(false);
 
     // Mirror baskets apply at submit; there is nothing pending to apply.
     let lm = env.launch_mirror(2, 4);
-    let sm = env.seed(&lm, &SeedPlan::default_for(&lm));
-    let ix = env.apply_book_ix(&lm, &sm, &anyone.pubkey(), &lm.book);
+    let _sm = env.seed(&lm, &SeedPlan::default_for(&lm));
+    let ix = env.apply_book_ix(&lm, &anyone.pubkey(), &lm.book);
     assert!(env.send(&[ix], &anyone, &[]).is_err());
 
     // While the rebalance runs the target is locked: no resubmission, and
     // applying twice is impossible.
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &l.book);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &l.book);
     env.send_ok(&[ix], &anyone, &[]);
     let ix = env.submit_book_ix(&l, &creator.pubkey(), &target, &[]);
     env.send_expect_err(&[ix], &creator, &[], err(BasketError::RebalanceActive));
-    let ix = env.apply_book_ix(&l, &s, &anyone.pubkey(), &l.book);
+    let ix = env.apply_book_ix(&l, &anyone.pubkey(), &l.book);
     env.send_expect_err(&[ix], &anyone, &[], err(BasketError::RebalanceActive));
 }

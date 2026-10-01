@@ -416,6 +416,7 @@ pub fn handle_sweep_fees<'info>(ctx: Context<'info, SweepFees<'info>>) -> Result
     let h = view.holder_shares(ctx.accounts.share_mint.supply, idle_shares, basket.pending_redeem_shares)?;
     let redeemer = Redeemer { ai: &fee_vault_ai, seeds: Some(fee_seeds), payer: &caller, record_frozen: false };
     let (net, _) = take_shares(&redeemer, &ctx.accounts.fee_vault_share_ata, &ctx.accounts.fee_vault_share_ata, &share_mint, programs.token, settle, 0)?;
+    let h = h.max(net); // see handle_redeem
 
     let signer = BasketSigner::new(basket);
     let basket_ai = ctx.accounts.basket.to_account_info();
@@ -541,6 +542,7 @@ pub fn handle_sweep_fees_components<'info>(ctx: Context<'info, SweepFeesComponen
     let idle_shares = idle_amount(&ctx.accounts.basket_share_ata.to_account_info())?;
     let h = view.holder_shares(ctx.accounts.share_mint.supply, idle_shares, basket.pending_redeem_shares)?;
     let net = ctx.accounts.redemption.shares;
+    let h = h.max(net); // see handle_redeem
 
     let caller = ctx.accounts.caller.to_account_info();
     let fee_vault_ai = ctx.accounts.fee_vault.to_account_info();

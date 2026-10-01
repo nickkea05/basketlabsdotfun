@@ -22,7 +22,7 @@ struct Setup {
 /// Mirror basket on [A, B, C]; target drops C and puts its weight on B;
 /// a C↔B pool exists to trade through.
 fn setup(env: &mut Env, nonce: u64) -> Setup {
-    env.allow_cp_amm_swaps();
+    env.allow_dlmm_swaps();
     let l = env.launch_mirror(3, nonce);
     env.seed(&l, &SeedPlan::default_for(&l));
     let pool = env.create_component_pool(&l.mints[2], &l.mints[1], 1_000_000_000_000);
@@ -68,7 +68,7 @@ fn keeper_swaps_a_leaving_position_into_a_target_one() {
 #[test]
 fn sell_cap_follows_the_weight_change() {
     let mut env = Env::initialized();
-    env.allow_cp_amm_swaps();
+    env.allow_dlmm_swaps();
     let l = env.launch_mirror(3, 2);
     env.seed(&l, &SeedPlan::default_for(&l));
     let (a, b) = (l.mints[0], l.mints[1]);
@@ -140,7 +140,7 @@ fn swap_guards() {
     env.send_ok(&[ix], &admin, &[]);
     let ix = env.execute_swap_ix(&l, &keeper.pubkey(), &c, &b, amount, 0, &inner);
     env.send_expect_err(&[ix], &keeper, &[], err(BasketError::SwapProgramNotAllowed));
-    env.allow_cp_amm_swaps();
+    env.allow_dlmm_swaps();
 
     // The inner instruction may not reference another basket-owned token
     // account (here: vault A smuggled into the account list).

@@ -27,11 +27,11 @@ fn mirror_with_target(env: &mut Env, n: usize, nonce: u64, target: impl Fn(&Laun
 #[test]
 fn finalize_reweights_reorders_and_flips_the_book_hash() {
     let mut env = Env::initialized();
-    env.allow_cp_amm_swaps();
+    env.allow_dlmm_swaps();
     let new_mint = env.create_mint(6, &env.admin.pubkey());
     env.whitelist(&[new_mint]);
     // [A, B, C] → [C, new, A]: B leaves, `new` enters, order changes.
-    let (l, s, target) = mirror_with_target(&mut env, 3, 1, |l| {
+    let (l, _s, target) = mirror_with_target(&mut env, 3, 1, |l| {
         (book(&[l.mints[2], new_mint, l.mints[0]], &[5_000, 2_000, 3_000]), vec![new_mint])
     });
     let keeper = env.keeper.insecure_clone();
@@ -85,9 +85,9 @@ fn finalize_reweights_reorders_and_flips_the_book_hash() {
     for (e, d) in new_book.iter().zip(&deposits) {
         env.mint_to(&e.mint, &buyer.pubkey(), *d);
     }
-    let h = env.holder_shares(&l, &s);
+    let h = env.holder_shares(&l);
     let l2 = Launched { book: new_book.clone(), mints: new_book.iter().map(|e| e.mint).collect(), ..l };
-    let r = env.mint(&l2, &s, &buyer, &deposits, 0, u64::MAX);
+    let r = env.mint(&l2, &buyer, &deposits, 0, u64::MAX);
     assert!(r.cu > 0);
     let got = env.token_amount(&Env::ata(&buyer.pubkey(), &l2.share_mint));
     assert!(got.abs_diff(h / 10 * 99 / 100) <= h / 10_000, "{got} vs {}", h / 10);
@@ -107,7 +107,7 @@ fn finalize_in_chunks_for_large_books() {
     let keeper = env.keeper.insecure_clone();
     // Position 8 leaves; give its tokens away out of band is not possible —
     // instead sell it into the pool of position 7.
-    env.allow_cp_amm_swaps();
+    env.allow_dlmm_swaps();
     let pool = env.create_component_pool(&l.mints[8], &l.mints[7], 1_000_000_000_000);
     let amt = env.token_amount(&Env::ata(&l.basket, &l.mints[8]));
     let inner = env.component_swap_ix(&pool, &l.basket, &l.mints[8], &l.mints[7], amt);

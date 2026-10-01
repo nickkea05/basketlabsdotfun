@@ -548,6 +548,10 @@ pub fn handle_redeem<'info>(ctx: Context<'info, Redeem<'info>>, shares: u64) -> 
         shares,
         basket.fees.redeem_fee_bps,
     )?;
+    // Position amounts are only exact to a few base units of their bin shares,
+    // so `h` can land just under the last holder's balance: never pay more
+    // than everything.
+    let h = h.max(net);
 
     let signer = BasketSigner::new(basket);
     let basket_ai = ctx.accounts.basket.to_account_info();
@@ -634,6 +638,10 @@ pub fn handle_redeem_begin<'info>(ctx: Context<'info, RedeemBegin<'info>>, share
         shares,
         basket.fees.redeem_fee_bps,
     )?;
+    // Position amounts are only exact to a few base units of their bin shares,
+    // so `h` can land just under the last holder's balance: never pay more
+    // than everything.
+    let h = h.max(net);
 
     let signer = BasketSigner::new(basket);
     let basket_ai = ctx.accounts.basket.to_account_info();
@@ -723,6 +731,7 @@ pub fn handle_redeem_components<'info>(ctx: Context<'info, RedeemComponents<'inf
     let idle_shares = idle_amount(&ctx.accounts.basket_share_ata.to_account_info())?;
     let h = view.holder_shares(ctx.accounts.share_mint.supply, idle_shares, basket.pending_redeem_shares)?;
     let net = ctx.accounts.redemption.shares;
+    let h = h.max(net); // see handle_redeem
 
     let holder = ctx.accounts.holder.to_account_info();
     let programs = Programs {

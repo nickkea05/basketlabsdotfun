@@ -27,28 +27,31 @@ fn seed_sets_the_high_water_mark_to_the_opening_nav() {
     let mut env = Env::initialized();
     let (l, _s) = seeded_managed(&mut env, 1, 1_000);
     let b: Basket = env.load(&l.basket);
-    // 0.3 SOL sleeve at r = 25% implies a 1.2 SOL fund over 1_000 shares.
+    // A 0.333 SOL sleeve at r = 25% implies a 1.333 SOL fund over 1_000 shares.
     let plan = SeedPlan::default_for(&l);
     let fund = plan.sleeve_lamports * BPS_TOTAL as u64 / DEFAULT_STEP_R_BPS as u64;
-    assert_eq!(fund, 1_200_000_000);
+    assert!(fund > 1_333_000_000 && fund < 1_334_000_000, "{fund}");
     assert_eq!(b.hwm_nav_lamports, fund * 1_000_000 / plan.initial_shares);
-    assert_eq!(b.hwm_nav_lamports, 1_200_000);
-    assert_eq!(b.last_crystallized_ts, env.now());
-    assert_eq!(b.last_mgmt_accrual_ts, env.now());
+    assert!(b.hwm_nav_lamports.abs_diff(1_333_333) <= 1);
+    // (The harness steps the clock 1 s after every seed/mint: JIT guard.)
+    assert_eq!(b.last_crystallized_ts, env.now() - 1);
+    assert_eq!(b.last_mgmt_accrual_ts, env.now() - 1);
     assert_eq!((b.fees.perf_fee_bps, b.fees.mgmt_fee_bps_per_year), (1_000, DEFAULT_MGMT_FEE_BPS_PER_YEAR));
 }
 
 #[test]
 fn crystallize_mints_management_and_performance_fees_above_the_hwm() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_managed(&mut env, 2, 1_000);
+    let (l, _s) = seeded_managed(&mut env, 2, 1_000);
     let creator_ata = Env::ata(&l.creator.pubkey(), &l.share_mint);
+    // The creator is the deployer and already holds the seed shares.
+    let creator_before = env.token_amount(&creator_ata);
     let hwm0 = env.load::<Basket>(&l.basket).hwm_nav_lamports;
     env.warp(31 * DAY);
 
     // NAV doubled.
     let nav = 2 * hwm0;
-    let q = env.crystallize_quote(&l, &s, nav);
+    let q = env.crystallize_quote(&l, nav);
     // 1%/yr for 31 days on 1_000 shares ≈ 0.85 shares.
     assert!(q.mgmt_shares > 800_000 && q.mgmt_shares < 900_000, "mgmt {}", q.mgmt_shares);
     // 10% of a 100% gain = 5% of the doubled fund → H·0.05/0.95 ≈ 52.6 shares
@@ -60,43 +63,44 @@ fn crystallize_mints_management_and_performance_fees_above_the_hwm() {
     let owed = (q.nav_after_mgmt - hwm0) as u128 * (q.h_before + q.mgmt_shares) as u128 / 10;
     assert!(creator_value.abs_diff(owed) * 1_000 <= owed, "{creator_value} vs {owed}");
 
-    let m = env.crystallize(&l, &s, nav);
+    let m = env.crystallize(&l, nav);
     println!("crystallize CU: {}", m.compute_units_consumed);
-    assert_eq!(env.token_amount(&creator_ata), q.mgmt_shares + q.perf_shares);
+    assert_eq!(env.token_amount(&creator_ata) - creator_before, q.mgmt_shares + q.perf_shares);
     let b: Basket = env.load(&l.basket);
     assert_eq!(b.hwm_nav_lamports, q.hwm_after);
     assert!(b.hwm_nav_lamports < nav && b.hwm_nav_lamports > hwm0);
     assert_eq!(b.last_crystallized_ts, env.now());
     assert_eq!(b.last_mgmt_accrual_ts, env.now());
-    assert_eq!(env.holder_shares(&l, &s), q.h_before + q.mgmt_shares + q.perf_shares);
+    assert_eq!(env.holder_shares(&l), q.h_before + q.mgmt_shares + q.perf_shares);
 }
 
 #[test]
 fn underwater_charges_only_the_management_fee() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_managed(&mut env, 3, 1_000);
+    let (l, _s) = seeded_managed(&mut env, 3, 1_000);
     let creator_ata = Env::ata(&l.creator.pubkey(), &l.share_mint);
+    let creator_before = env.token_amount(&creator_ata);
     let hwm0 = env.load::<Basket>(&l.basket).hwm_nav_lamports;
     env.warp(45 * DAY);
 
     let nav = hwm0 / 2;
-    let q = env.crystallize_quote(&l, &s, nav);
+    let q = env.crystallize_quote(&l, nav);
     assert!(q.mgmt_shares > 0 && q.perf_shares == 0);
-    env.crystallize(&l, &s, nav);
-    assert_eq!(env.token_amount(&creator_ata), q.mgmt_shares);
+    env.crystallize(&l, nav);
+    assert_eq!(env.token_amount(&creator_ata) - creator_before, q.mgmt_shares);
     let b: Basket = env.load(&l.basket);
     assert_eq!(b.hwm_nav_lamports, hwm0, "HWM does not move down");
 
     // Recovering to exactly the HWM is still nothing; above it pays only on
     // the part above.
     env.warp(31 * DAY);
-    let q2 = env.crystallize_quote(&l, &s, hwm0);
+    let q2 = env.crystallize_quote(&l, hwm0);
     assert_eq!(q2.perf_shares, 0);
-    env.crystallize(&l, &s, hwm0);
+    env.crystallize(&l, hwm0);
     env.warp(31 * DAY);
-    let q3 = env.crystallize_quote(&l, &s, hwm0 + hwm0 / 10);
+    let q3 = env.crystallize_quote(&l, hwm0 + hwm0 / 10);
     assert!(q3.perf_shares > 0);
-    env.crystallize(&l, &s, hwm0 + hwm0 / 10);
+    env.crystallize(&l, hwm0 + hwm0 / 10);
     let b: Basket = env.load(&l.basket);
     assert_eq!(b.hwm_nav_lamports, q3.hwm_after);
 }
@@ -113,57 +117,70 @@ fn nothing_to_crystallize_when_no_fee_is_due() {
     let admin = env.admin.insecure_clone();
     env.send_ok(&[ix], &admin, &[]);
 
-    let (l, s) = seeded_managed(&mut env, 4, 1_000);
+    let (l, _s) = seeded_managed(&mut env, 4, 1_000);
     let hwm0 = env.load::<Basket>(&l.basket).hwm_nav_lamports;
     env.warp(31 * DAY);
-    env.crystallize_expect_err(&l, &s, hwm0, err(BasketError::NothingToCrystallize));
-    env.crystallize_expect_err(&l, &s, hwm0 - 1, err(BasketError::NothingToCrystallize));
+    env.crystallize_expect_err(&l, hwm0, err(BasketError::NothingToCrystallize));
+    env.crystallize_expect_err(&l, hwm0 - 1, err(BasketError::NothingToCrystallize));
     // A perf fee of zero still moves the HWM with the attested NAV.
-    let (l0, s0) = seeded_managed(&mut env, 5, 0);
+    let (l0, _s0) = seeded_managed(&mut env, 5, 0);
+    let creator0_before = env.token_amount(&Env::ata(&l0.creator.pubkey(), &l0.share_mint));
     env.warp(31 * DAY);
-    env.crystallize(&l0, &s0, 3 * hwm0);
+    env.crystallize(&l0, 3 * hwm0);
     let b: Basket = env.load(&l0.basket);
     assert_eq!(b.hwm_nav_lamports, 3 * hwm0);
-    assert_eq!(env.token_amount(&Env::ata(&l0.creator.pubkey(), &l0.share_mint)), 0);
+    assert_eq!(env.token_amount(&Env::ata(&l0.creator.pubkey(), &l0.share_mint)), creator0_before);
 }
 
 #[test]
 fn crystallize_is_periodic_keeper_attested_and_managed_only() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_managed(&mut env, 6, 1_000);
+    let (l, _s) = seeded_managed(&mut env, 6, 1_000);
     let hwm0 = env.load::<Basket>(&l.basket).hwm_nav_lamports;
 
     // Too soon (period is 30 days).
     env.warp(10 * DAY);
-    env.crystallize_expect_err(&l, &s, 2 * hwm0, err(BasketError::CrystallizeTooSoon));
+    env.crystallize_expect_err(&l, 2 * hwm0, err(BasketError::CrystallizeTooSoon));
     env.warp(21 * DAY);
 
     // Only a configured keeper may attest.
     let stranger = env.fund(LAMPORTS);
-    let ix = env.crystallize_ix(&l, &s, &stranger.pubkey(), 2 * hwm0);
+    let ix = env.crystallize_ix(&l, &stranger.pubkey(), 2 * hwm0);
     env.send_expect_err(&[ix], &stranger, &[], err(BasketError::Unauthorized));
     // NAV must be positive.
-    env.crystallize_expect_err(&l, &s, 0, err(BasketError::ZeroAmount));
+    env.crystallize_expect_err(&l, 0, err(BasketError::ZeroAmount));
 
     // Fixed baskets have no performance or management fee.
     let lf = env.launch_fixed(2, 7);
-    let sf = env.seed(&lf, &SeedPlan::default_for(&lf));
+    let _sf = env.seed(&lf, &SeedPlan::default_for(&lf));
     env.warp(31 * DAY);
-    env.crystallize_expect_err(&lf, &sf, 2 * hwm0, err(BasketError::InvalidBasketType));
+    env.crystallize_expect_err(&lf, 2 * hwm0, err(BasketError::InvalidBasketType));
 
     // Works right after the period, and then the clock restarts.
-    env.crystallize(&l, &s, 2 * hwm0);
-    env.crystallize_expect_err(&l, &s, 3 * hwm0, err(BasketError::CrystallizeTooSoon));
+    env.crystallize(&l, 2 * hwm0);
+    env.crystallize_expect_err(&l, 3 * hwm0, err(BasketError::CrystallizeTooSoon));
 }
 
 #[test]
 fn creator_share_account_is_created_on_demand() {
     let mut env = Env::initialized();
-    let (l, s) = seeded_managed(&mut env, 8, 1_000);
-    let creator_ata = Env::ata(&l.creator.pubkey(), &l.share_mint);
+    let (l, _s) = seeded_managed(&mut env, 8, 1_000);
+    // The deployer's own share ATA holds the seed shares; a creator who moved
+    // them elsewhere and closed the account gets it re-created.
+    let creator = l.creator.insecure_clone();
+    let creator_ata = Env::ata(&creator.pubkey(), &l.share_mint);
+    let elsewhere = env.fund(LAMPORTS);
+    let elsewhere_ata = env.create_ata(&elsewhere.pubkey(), &l.share_mint);
+    let held = env.token_amount(&creator_ata);
+    let spl = anchor_spl::token::spl_token::ID;
+    let ixs = [
+        anchor_spl::token::spl_token::instruction::transfer(&spl, &creator_ata, &elsewhere_ata, &creator.pubkey(), &[], held).unwrap(),
+        anchor_spl::token::spl_token::instruction::close_account(&spl, &creator_ata, &creator.pubkey(), &creator.pubkey(), &[]).unwrap(),
+    ];
+    env.send_ok(&ixs, &creator, &[]);
     assert!(env.account(&creator_ata).is_none());
     env.warp(31 * DAY);
     let hwm0 = env.load::<Basket>(&l.basket).hwm_nav_lamports;
-    env.crystallize(&l, &s, hwm0 * 3 / 2);
+    env.crystallize(&l, hwm0 * 3 / 2);
     assert!(env.token_amount(&creator_ata) > 0);
 }

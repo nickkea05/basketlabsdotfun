@@ -1,5 +1,7 @@
-//! `add_positions`: books larger than one transaction (D20). Basket is inert
-//! until `complete`; completion checks the chain hash and weight sum.
+//! `add_positions`: books larger than one transaction (D20). The launch
+//! transaction carries at most `CREATE_BASKET_POSITIONS`; the rest arrive in
+//! chunks of `POSITIONS_PER_TX`. The basket is inert until `complete`;
+//! completion checks the chain hash and weight sum.
 
 mod common;
 
@@ -10,39 +12,39 @@ use common::*;
 use solana_keypair::Keypair;
 use solana_signer::Signer;
 
-fn setup(env: &mut Env, n: usize, nonce: u64) -> (Keypair, Keypair, Vec<PositionArg>, CreateBasketArgs, Pubkey) {
-    let creator = Keypair::new();
-    let payer = env.fund(50 * LAMPORTS);
+fn setup(env: &mut Env, n: usize, nonce: u64) -> (Keypair, Vec<PositionArg>, CreateBasketArgs, Pubkey) {
+    let deployer = env.new_deployer();
     let admin_key = env.admin.pubkey();
     let mints: Vec<Pubkey> = (0..n).map(|_| env.create_mint(6, &admin_key)).collect();
     env.whitelist(&mints);
     let bk = book(&mints, &equal_weights(n));
-    let args = fixed_args(&creator.pubkey(), nonce, &bk);
-    let share_mint = share_mint_pda(&creator.pubkey(), nonce);
-    (creator, payer, bk, args, share_mint)
+    let args = fixed_args(nonce, &bk, env.now());
+    let share_mint = share_mint_pda(&deployer.pubkey(), nonce);
+    (deployer, bk, args, share_mint)
 }
 
 #[test]
 fn twenty_assets_in_chunks_completes_only_at_the_end() {
     let mut env = Env::initialized();
-    let (creator, payer, bk, args, share_mint) = setup(&mut env, 20, 1);
+    let (deployer, bk, args, share_mint) = setup(&mut env, 20, 1);
     let basket_key = basket_pda(&share_mint);
 
-    // create_basket with the first 6, then 7 + 7.
-    let ixs = [creator_signature_ix(&creator, &args, 1), create_basket_ix(&payer.pubkey(), &args, &bk[..6])];
-    let meta = env.send_ok(&ixs, &payer, &[]);
-    println!("create_basket(6 positions) CU: {}", meta.compute_units_consumed);
+    // create_basket with the first 6, then 8 + 6.
+    let head = CREATE_BASKET_POSITIONS;
+    let meta = env.send_ok(&[create_basket_ix(&deployer.pubkey(), &args, &bk[..head], None)], &deployer, &[]);
+    println!("create_basket({head} positions) CU: {}", meta.compute_units_consumed);
     let b: Basket = env.load(&basket_key);
-    assert_eq!(b.position_count, 6);
+    assert_eq!(b.position_count, head as u16);
     assert!(!b.complete);
 
-    let meta = env.send_ok(&[add_positions_ix(&payer.pubkey(), &share_mint, &bk[6..13])], &payer, &[]);
-    println!("add_positions(7) CU: {}", meta.compute_units_consumed);
+    let meta = env.send_ok(&[add_positions_ix(&deployer.pubkey(), &share_mint, &bk[head..head + POSITIONS_PER_TX])], &deployer, &[]);
+    println!("add_positions({POSITIONS_PER_TX}) CU: {}", meta.compute_units_consumed);
+    assert!(meta.compute_units_consumed < 400_000);
     let b: Basket = env.load(&basket_key);
-    assert_eq!(b.position_count, 13);
+    assert_eq!(b.position_count, (head + POSITIONS_PER_TX) as u16);
     assert!(!b.complete);
 
-    env.send_ok(&[add_positions_ix(&payer.pubkey(), &share_mint, &bk[13..])], &payer, &[]);
+    env.send_ok(&[add_positions_ix(&deployer.pubkey(), &share_mint, &bk[head + POSITIONS_PER_TX..])], &deployer, &[]);
     let b: Basket = env.load(&basket_key);
     assert_eq!(b.position_count, 20);
     assert!(b.complete);
@@ -57,28 +59,40 @@ fn twenty_assets_in_chunks_completes_only_at_the_end() {
     let admin_key = env.admin.pubkey();
     let extra = env.create_mint(6, &admin_key);
     env.whitelist(&[extra]);
-    let ix = add_positions_ix(&payer.pubkey(), &share_mint, &[PositionArg { mint: extra, weight_bps: 1 }]);
-    env.send_expect_err(&[ix], &payer, &[], err(BasketError::ImmutableBasket));
+    let ix = add_positions_ix(&deployer.pubkey(), &share_mint, &[PositionArg { mint: extra, weight_bps: 1 }]);
+    env.send_expect_err(&[ix], &deployer, &[], err(BasketError::ImmutableBasket));
+}
+
+#[test]
+fn the_launch_transaction_carries_at_most_six_positions() {
+    let mut env = Env::initialized();
+    let (deployer, bk, args, _) = setup(&mut env, 9, 7);
+    // 7 positions in create_basket: more than 64 inner instructions.
+    let ix = create_basket_ix(&deployer.pubkey(), &args, &bk[..CREATE_BASKET_POSITIONS + 1], None);
+    let r = env.send(&[ix], &deployer, &[]);
+    assert!(r.is_err(), "7 positions must not fit the launch transaction");
+    // Six do.
+    let ix = create_basket_ix(&deployer.pubkey(), &args, &bk[..CREATE_BASKET_POSITIONS], None);
+    env.send_ok(&[ix], &deployer, &[]);
 }
 
 #[test]
 fn wrong_order_fails_at_completion_and_duplicates_fail_immediately() {
     let mut env = Env::initialized();
-    let (creator, payer, bk, args, share_mint) = setup(&mut env, 4, 2);
+    let (deployer, bk, args, share_mint) = setup(&mut env, 4, 2);
 
-    let ixs = [creator_signature_ix(&creator, &args, 1), create_basket_ix(&payer.pubkey(), &args, &bk[..2])];
-    env.send_ok(&ixs, &payer, &[]);
+    env.send_ok(&[create_basket_ix(&deployer.pubkey(), &args, &bk[..2], None)], &deployer, &[]);
 
     // Re-adding an existing mint: its PDA already exists.
-    let ix = add_positions_ix(&payer.pubkey(), &share_mint, &[bk[0]]);
-    env.send_expect_err(&[ix], &payer, &[], err(BasketError::DuplicateMint));
+    let ix = add_positions_ix(&deployer.pubkey(), &share_mint, &[bk[0]]);
+    env.send_expect_err(&[ix], &deployer, &[], err(BasketError::DuplicateMint));
 
     // Delivering the last two in the wrong order: hash mismatch at completion.
-    let ix = add_positions_ix(&payer.pubkey(), &share_mint, &[bk[3], bk[2]]);
-    env.send_expect_err(&[ix], &payer, &[], err(BasketError::BookHashMismatch));
+    let ix = add_positions_ix(&deployer.pubkey(), &share_mint, &[bk[3], bk[2]]);
+    env.send_expect_err(&[ix], &deployer, &[], err(BasketError::BookHashMismatch));
 
     // Correct order completes.
-    env.send_ok(&[add_positions_ix(&payer.pubkey(), &share_mint, &bk[2..])], &payer, &[]);
+    env.send_ok(&[add_positions_ix(&deployer.pubkey(), &share_mint, &bk[2..])], &deployer, &[]);
     let b: Basket = env.load(&basket_pda(&share_mint));
     assert!(b.complete);
 }
@@ -86,26 +100,24 @@ fn wrong_order_fails_at_completion_and_duplicates_fail_immediately() {
 #[test]
 fn cannot_exceed_asset_count() {
     let mut env = Env::initialized();
-    let (creator, payer, bk, mut args, share_mint) = setup(&mut env, 3, 3);
-    args.asset_count = 2; // signed for two, deliver three
+    let (deployer, bk, mut args, share_mint) = setup(&mut env, 3, 3);
+    args.asset_count = 2; // declared two, deliver three
     args.book_hash = chain_hash(&bk[..2]);
-    let ixs = [creator_signature_ix(&creator, &args, 1), create_basket_ix(&payer.pubkey(), &args, &bk[..1])];
-    env.send_ok(&ixs, &payer, &[]);
+    env.send_ok(&[create_basket_ix(&deployer.pubkey(), &args, &bk[..1], None)], &deployer, &[]);
     // Three weights still sum to 10_000, so the count cap is what trips.
-    let ix = add_positions_ix(&payer.pubkey(), &share_mint, &bk[1..]);
-    env.send_expect_err(&[ix], &payer, &[], err(BasketError::TooManyAssets));
+    let ix = add_positions_ix(&deployer.pubkey(), &share_mint, &bk[1..]);
+    env.send_expect_err(&[ix], &deployer, &[], err(BasketError::TooManyAssets));
     // And an over-weight second position (count fits, weights do not).
     let heavy = PositionArg { mint: bk[1].mint, weight_bps: 10_000 };
-    let ix = add_positions_ix(&payer.pubkey(), &share_mint, &[heavy]);
-    env.send_expect_err(&[ix], &payer, &[], err(BasketError::WeightsMustSumToTotal));
+    let ix = add_positions_ix(&deployer.pubkey(), &share_mint, &[heavy]);
+    env.send_expect_err(&[ix], &deployer, &[], err(BasketError::WeightsMustSumToTotal));
 }
 
 #[test]
 fn anyone_can_pay_for_positions_but_only_whitelisted_mints_enter() {
     let mut env = Env::initialized();
-    let (creator, payer, bk, args, share_mint) = setup(&mut env, 3, 4);
-    let ixs = [creator_signature_ix(&creator, &args, 1), create_basket_ix(&payer.pubkey(), &args, &bk[..1])];
-    env.send_ok(&ixs, &payer, &[]);
+    let (deployer, bk, args, share_mint) = setup(&mut env, 3, 4);
+    env.send_ok(&[create_basket_ix(&deployer.pubkey(), &args, &bk[..1], None)], &deployer, &[]);
 
     let helper = env.fund(5 * LAMPORTS);
     env.send_ok(&[add_positions_ix(&helper.pubkey(), &share_mint, &bk[1..2])], &helper, &[]);
@@ -115,4 +127,12 @@ fn anyone_can_pay_for_positions_but_only_whitelisted_mints_enter() {
     let rogue = env.create_mint(6, &admin_key);
     let ix = add_positions_ix(&helper.pubkey(), &share_mint, &[PositionArg { mint: rogue, weight_bps: bk[2].weight_bps }]);
     env.send_expect_err(&[ix], &helper, &[], err(BasketError::MintNotWhitelisted));
+}
+
+#[test]
+fn an_incomplete_basket_cannot_be_seeded() {
+    let mut env = Env::initialized();
+    let l = env.launch_partial(9, 5, 6);
+    assert!(!l.basket_state(&env).complete);
+    env.seed_expect_err(&l, &SeedPlan::default_for(&l), err(BasketError::BasketIncomplete));
 }

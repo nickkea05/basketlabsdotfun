@@ -10,7 +10,6 @@ use anchor_lang::prelude::*;
 use basket::constants::*;
 use basket::dlmm;
 use basket::error::BasketError;
-use basket::state::*;
 use common::*;
 use solana_signer::Signer as _;
 

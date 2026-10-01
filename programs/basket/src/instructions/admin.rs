@@ -62,6 +62,7 @@ pub fn handle_initialize_config(
     config.allow_open_gate = false;
     config.bskt_mint = None;
     config.prizes = PrizeParams::default();
+    config.prizes.epoch_anchor_ts = Clock::get()?.unix_timestamp;
     config.creator_tier_bps = [DEFAULT_CREATOR_SPLIT_BPS; TIER_COUNT];
     config.swap_programs = vec![JUPITER_V6_ID];
     config.rebalance_tolerance_bps = DEFAULT_REBALANCE_TOLERANCE_BPS;
