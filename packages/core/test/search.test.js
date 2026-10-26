@@ -6,7 +6,7 @@ const mk = (o) => ({ ca: '7xKq…9bA2', type: BasketType.Fixed, ageH: 100, marke
 
 const items = [
   mk({ id: 'sol', name: 'Solana Blue', ticker: 'BLUE', marketCap: 4_000_000, volume24h: 600_000, ageH: 144, basket: [{ symbol: 'SOL' }, { symbol: 'JUP' }] }),
-  mk({ id: 'season', name: 'Solana Season', ticker: 'SZN', marketCap: 61_000, volume24h: 88_000, ageH: 2, raised: 58, target: 85, type: BasketType.Mirror }),
+  mk({ id: 'season', name: 'Solana Season', ticker: 'SZN', marketCap: 61_000, volume24h: 88_000, ageH: 2, mintLeftH: 46, type: BasketType.Mirror }),
   mk({ id: 'majors', name: 'Majors', ticker: 'MAJ', marketCap: 2_800_000, volume24h: 400_000, ageH: 216, basket: [{ symbol: 'wBTC' }, { symbol: 'SOL' }] }),
   mk({ id: 'dogs', name: 'Dog Park', ticker: 'DOGS', marketCap: 960_000, volume24h: 274_000, ageH: 336, type: BasketType.Managed, ca: 'DoGs…park' }),
 ]
@@ -73,11 +73,11 @@ test('age, type and status filters compose with the query', () => {
     ['dogs']
   )
   assert.deepEqual(
-    searchBaskets(items, '', { ...base, status: 'curve' }).map((t) => t.id),
+    searchBaskets(items, '', { ...base, status: 'mint' }).map((t) => t.id),
     ['season']
   )
   assert.deepEqual(
-    searchBaskets(items, 'solana', { ...base, status: 'graduated' }).map((t) => t.id),
+    searchBaskets(items, 'solana', { ...base, status: 'closed' }).map((t) => t.id),
     ['sol']
   )
 })

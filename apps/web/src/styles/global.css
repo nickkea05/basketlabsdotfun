@@ -1377,6 +1377,148 @@ a {
   font-size: 10px;
 }
 
+/* ---------- explore: homepage sections ---------- */
+
+.badge.prem {
+  color: var(--up);
+}
+.badge.disc {
+  color: var(--accent);
+}
+
+.card-window {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.newest-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  width: 260px;
+  padding: 0 10px 0 12px;
+  border-radius: var(--radius-pill);
+  font-size: 12px;
+  color: var(--faint);
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition: box-shadow 0.2s var(--ease);
+}
+.section-search:focus-within {
+  color: var(--text);
+  box-shadow:
+    0 0 0 1px var(--focus),
+    0 0 0 3px var(--focus-halo);
+}
+.section-search input {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+}
+.section-search button {
+  display: inline-grid;
+  place-items: center;
+  color: var(--faint);
+}
+.section-search button:hover {
+  color: var(--text);
+}
+@media (max-width: 640px) {
+  .section-head {
+    flex-wrap: wrap;
+  }
+  .newest-tools {
+    width: 100%;
+  }
+  .section-search {
+    flex: 1;
+    width: auto;
+  }
+}
+
+.perf {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 4px 12px;
+}
+@media (max-width: 760px) {
+  .perf {
+    grid-template-columns: 1fr;
+  }
+}
+.perf-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  text-align: left;
+  transition: background 0.15s;
+}
+.perf-row:hover {
+  background: rgba(255, 255, 255, 0.045);
+}
+.perf-rank {
+  width: 18px;
+  flex: none;
+  color: var(--faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.perf-orb {
+  width: 32px;
+  height: 32px;
+}
+.perf-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-weight: 500;
+}
+.perf-name > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.perf-name small,
+.perf-val small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 400;
+}
+.perf-val {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.perf-more {
+  display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+
 .filter-pop {
   width: 580px;
   max-width: calc(100vw - 48px);

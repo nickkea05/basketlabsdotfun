@@ -88,7 +88,6 @@ export default function QuickSearch({ onPick, onAdvanced }) {
           ) : (
             <ul className="qs-list" role="listbox">
               {shown.map((t, i) => {
-                const onCurve = t.raised != null
                 return (
                   <li key={t.id} role="option" aria-selected={i === cursor}>
                     <button className={`qs-item ${i === cursor ? 'active' : ''}`} onMouseMove={() => setCursor(i)} onClick={() => pick(t)}>
@@ -98,7 +97,7 @@ export default function QuickSearch({ onPick, onAdvanced }) {
                         <small>${t.ticker}</small>
                       </span>
                       <span className="qs-val mono">
-                        {onCurve ? `${t.raised} / ${t.target} SOL` : fmtUsd(t.marketCap)}
+                        {fmtUsd(t.marketCap)}
                         <small className={t.change24h >= 0 ? 'up' : 'down'}>
                           {t.change24h >= 0 ? '+' : ''}
                           {t.change24h}%

@@ -82,7 +82,7 @@ export default function Leaderboard({ go }) {
           </div>
           <div className="empty">
             <strong>No creators ranked yet</strong>
-            The board fills in as baskets launch, trade and graduate. Rankings need a track record, so the first entries appear after the first launches have
+            The board fills in as baskets launch and trade. Rankings need a track record, so the first entries appear after the first launches have
             some history behind them.
             <div>
               <button className="btn btn-ghost" onClick={() => go('create')}>

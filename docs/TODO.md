@@ -61,10 +61,12 @@ Working rules:
       them) and rate-limits hard.
 - [ ] Indexer: read baskets, share prices, NAV, holders from chain. Replaces
       `apps/web/src/mocks/baskets.js`. Explore page currently shows fake data.
-      Trending sorts and the Live filter form (`filterBaskets` in core: status, type,
+      The homepage sections (`market.js` in core: Mint open, Trending, Top performers)
+      and the Newest filter form (`filterBaskets` in core: mint status, type,
       include/exclude keywords, min/max on cap, volume, change, age, asset count)
-      already run client-side against that shape (`type`, `ageH`, `marketCap`,
-      `volume24h`, `change24h`, `raised`); the indexer needs to emit the same fields,
+      already run client-side against that shape (`type`, `ageH`, `mintLeftH`,
+      `marketCap`, `price`, `nav`, `volume24h`, `volume1h`, `txns1h`, `change24h`,
+      `navChange24h`/`7d`/`All`); the indexer needs to emit the same fields,
       and the same filter schema should become its query parameters so the list
       pages server-side once there are thousands of baskets.
 - [ ] **Creator leaderboard data.** Per creator: baskets launched, per-basket max gain
@@ -116,8 +118,9 @@ Working rules:
       `searchBaskets` in core. Point it at the indexer. A pasted mint that is not in
       the index should fall back to an on-chain lookup of the share-mint marker before
       saying "not a basket". Creator search (by wallet) once creators are indexed.
-- [ ] Trending shows the top 10 by the chosen sort across every basket. Decide whether
-      on-curve baskets should be eligible or whether Trending is graduated-only.
+- [ ] Tune the homepage thresholds against real data: Trending needs ≥1 trade in the
+      last hour; Top performers needs 24h / 7d / 3d of history for the 24h / 7d / All
+      windows and ≥ $100K market cap; "At NAV" badge inside ±0.5 %.
 - [ ] Leaderboard rows: the table header exists, the row component does not. Build it
       when the first real data lands so it is shaped by real numbers, not guesses.
 - [ ] Leaderboard 7d / 30d / All toggle is state only; nothing reads it yet.

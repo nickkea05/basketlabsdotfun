@@ -7,6 +7,7 @@ import {
   SEARCH_SORTS,
   SEARCH_STATUS,
   SEARCH_TYPES,
+  isMintOpen,
   looksLikeAddress,
   pageResults,
   searchBaskets,
@@ -157,7 +158,7 @@ export default function SearchModal({ open, onClose, onPick, initialQuery = '' }
           ) : (
             <ul className="sm-list" ref={listRef} role="listbox">
               {pg.items.map((t, i) => {
-                const onCurve = t.raised != null
+                const minting = isMintOpen(t)
                 return (
                   <li key={t.id} role="option" aria-selected={i === cursor}>
                     <button className={`sm-item ${i === cursor ? 'active' : ''}`} onMouseMove={() => setCursor(i)} onClick={() => pick(t)}>
@@ -170,7 +171,7 @@ export default function SearchModal({ open, onClose, onPick, initialQuery = '' }
                         <span className="sm-meta">
                           ${t.ticker}
                           <i />
-                          {onCurve ? `${t.raised} / ${t.target} SOL` : `${fmtUsd(t.marketCap)} MC`}
+                          {`${fmtUsd(t.marketCap)} MC`}
                           <i />
                           {t.age}
                           <i />
@@ -182,10 +183,10 @@ export default function SearchModal({ open, onClose, onPick, initialQuery = '' }
                           {t.change24h >= 0 ? '+' : ''}
                           {t.change24h}%
                         </span>
-                        {onCurve ? (
+                        {minting ? (
                           <span className="badge live">
                             <i className="pulse" />
-                            Curve
+                            Mint open
                           </span>
                         ) : (
                           <span className="chips sm-chips">

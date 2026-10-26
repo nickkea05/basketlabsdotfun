@@ -23,8 +23,7 @@ const items = [
     volume24h: 88_000,
     change24h: 41,
     ageH: 2,
-    raised: 58,
-    target: 85,
+    mintLeftH: 46,
     type: BasketType.Mirror,
     basket: [{ symbol: 'SOL' }],
   }),
@@ -79,8 +78,8 @@ test('an unreadable bound is ignored rather than filtering everything out', () =
 })
 
 test('status and type narrow categorically', () => {
-  assert.deepEqual(ids(filterBaskets(items, { ...EMPTY_FILTERS, status: 'curve' })), ['szn'])
-  assert.deepEqual(ids(filterBaskets(items, { ...EMPTY_FILTERS, status: 'graduated' })), ['blue', 'dogs'])
+  assert.deepEqual(ids(filterBaskets(items, { ...EMPTY_FILTERS, status: 'mint' })), ['szn'])
+  assert.deepEqual(ids(filterBaskets(items, { ...EMPTY_FILTERS, status: 'closed' })), ['blue', 'dogs'])
   assert.deepEqual(ids(filterBaskets(items, { ...EMPTY_FILTERS, type: 'Managed' })), ['dogs'])
 })
 
@@ -92,7 +91,7 @@ test('include keywords match name, ticker or held asset (any); exclude removes o
 })
 
 test('filters compose', () => {
-  const f = { ...EMPTY_FILTERS, status: 'graduated', include: 'sol', ranges: { marketCap: { min: '1m' } } }
+  const f = { ...EMPTY_FILTERS, status: 'closed', include: 'sol', ranges: { marketCap: { min: '1m' } } }
   assert.deepEqual(ids(filterBaskets(items, f)), ['blue'])
 })
 

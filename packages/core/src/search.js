@@ -3,6 +3,7 @@
 // lands without changing the modal.
 
 import { BASKET_TYPES } from './constants.js'
+import { isMintOpen } from './market.js'
 
 export const SEARCH_PAGE_SIZE = 24
 
@@ -36,8 +37,8 @@ export const SEARCH_TYPES = [
 
 export const SEARCH_STATUS = [
   { id: 'all', label: 'All', test: () => true },
-  { id: 'curve', label: 'On curve', test: (t) => t.raised != null },
-  { id: 'graduated', label: 'Graduated', test: (t) => t.raised == null },
+  { id: 'mint', label: 'Mint open', test: isMintOpen },
+  { id: 'closed', label: 'Mint closed', test: (t) => !isMintOpen(t) },
 ]
 
 export const SEARCH_DEFAULTS = Object.freeze({ sort: 'relevance', match: 'all', age: 'all', type: 'all', status: 'all' })

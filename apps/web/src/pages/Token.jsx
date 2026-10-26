@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { fmtHoursLeft, isMintOpen, mintHoursLeft, mintWindowLeft, premiumPct } from '@basketfun/core'
 import Chart from '../components/charts/Chart.jsx'
 import { Orb } from '../components/ui/index.js'
 import { series, activity } from '../mocks/baskets.js'
@@ -16,9 +17,9 @@ const Pct = ({ v }) => (
 export default function Token({ t, back, go }) {
   const [side, setSide] = useState('buy')
   const [range, setRange] = useState('1D')
-  const isLive = t.raised != null
+  const isLive = isMintOpen(t)
   const data = series(t.id.length * 13 + range.length + (t.marketCap % 97))
-  const premium = ((t.price - t.nav) / t.nav) * 100
+  const premium = premiumPct(t)
 
   return (
     <div className="page container">
@@ -41,7 +42,7 @@ export default function Token({ t, back, go }) {
                 {t.name}
                 <span className={`badge ${isLive ? 'live' : ''}`}>
                   {isLive && <i className="pulse" />}
-                  {isLive ? 'On curve' : 'Graduated'}
+                  {isLive ? 'Mint open' : 'Mint closed'}
                 </span>
               </h1>
               <div className="head-meta">
@@ -64,7 +65,7 @@ export default function Token({ t, back, go }) {
           </div>
           <div className="nav-right">
             <button className="btn btn-ghost raised">Explorer</button>
-            <button className="btn btn-ghost raised">{isLive ? 'Curve' : 'Pool'}</button>
+            <button className="btn btn-ghost raised">Pool</button>
           </div>
         </div>
 
@@ -88,11 +89,11 @@ export default function Token({ t, back, go }) {
             </div>
           </div>
           <div className="stat">
-            <div className="stat-label">{isLive ? 'Raised' : '24h volume'}</div>
+            <div className="stat-label">{isLive ? 'Mint window' : '24h volume'}</div>
             <div className="stat-value">
               {isLive ? (
                 <>
-                  {t.raised} <small style={{ color: 'var(--muted)' }}>/ {t.target} SOL</small>
+                  {fmtHoursLeft(mintHoursLeft(t))} <small style={{ color: 'var(--muted)' }}>left at NAV</small>
                 </>
               ) : (
                 fmtUsd(t.volume24h)
@@ -100,7 +101,7 @@ export default function Token({ t, back, go }) {
             </div>
             {isLive && (
               <div className="progress" style={{ marginTop: 10 }}>
-                <div style={{ width: `${(t.raised / t.target) * 100}%` }} />
+                <div style={{ width: `${mintWindowLeft(t) * 100}%` }} />
               </div>
             )}
           </div>

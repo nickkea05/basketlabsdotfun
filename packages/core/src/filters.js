@@ -1,8 +1,9 @@
-// Comprehensive basket filters for the Live panel: categorical toggles,
+// Comprehensive basket filters for the Newest panel: categorical toggles,
 // include / exclude keywords and typed min / max ranges. Pure; the indexer can
 // run the same schema server-side later.
 
 import { BASKET_TYPES } from './constants.js'
+import { isMintOpen } from './market.js'
 
 export const RANGE_FIELDS = [
   { id: 'marketCap', label: 'Market cap', unit: '$', get: (t) => t.marketCap },
@@ -14,8 +15,8 @@ export const RANGE_FIELDS = [
 
 export const FILTER_STATUS = [
   { id: 'all', label: 'All', test: () => true },
-  { id: 'curve', label: 'On curve', test: (t) => t.raised != null },
-  { id: 'graduated', label: 'Graduated', test: (t) => t.raised == null },
+  { id: 'mint', label: 'Mint open', test: isMintOpen },
+  { id: 'closed', label: 'Mint closed', test: (t) => !isMintOpen(t) },
 ]
 
 export const FILTER_TYPES = [
