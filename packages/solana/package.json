@@ -1,15 +1,23 @@
 {
   "name": "@basketfun/solana",
   "version": "0.0.1",
-  "description": "Solana helpers: base58, public key validation, well-known program ids. The Anchor client lands here once the program exists.",
+  "description": "Solana helpers (base58, public key validation, well-known program ids) and the basket program client.",
   "type": "module",
   "exports": {
-    ".": "./src/index.js"
+    ".": "./src/index.js",
+    "./basket": "./src/basket/index.js"
   },
   "files": [
-    "src"
+    "src",
+    "idl"
   ],
+  "scripts": {
+    "test": "node --test",
+    "idl:sync": "node -e \"require('fs').copyFileSync('../../target/idl/basket.json','idl/basket.json')\""
+  },
   "dependencies": {
-    "@anchor-lang/core": "^1.2.0"
+    "@anchor-lang/core": "^1.2.0",
+    "@noble/hashes": "^1.8.0",
+    "@solana/web3.js": "^1.99.0"
   }
 }

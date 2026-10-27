@@ -27,6 +27,8 @@ Thumbs.db
 target/
 .anchor/
 .surfpool/
+# simulation keypairs (fork only)
+sim/.keys/
 test-ledger/
 **/*.rs.bk
 # deploy keypairs are never committed; target/ covers target/deploy/*-keypair.json
