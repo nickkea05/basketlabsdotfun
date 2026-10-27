@@ -222,7 +222,7 @@ function ExpandButton({ expanded, onToggle }) {
 /** A main-area section: a scrolling column on the dashboard, or the whole area when expanded. */
 function Column({ title, count, tools, sub, expanded, onToggle, children }) {
   return (
-    <section className={`panel section dash-col ${expanded ? 'expanded' : ''}`}>
+    <section className={`panel section lit dash-col ${expanded ? 'expanded' : ''}`}>
       {expanded && <div className="expanded-pill">Expanded view · collapse to return to the dashboard</div>}
       <div className="section-head">
         <h2>{title}</h2>
@@ -384,7 +384,8 @@ function TopPerformers({ openToken, go }) {
   const items = useMemo(() => topPerformers(ALL, win, RAIL_PERFORMERS), [win])
 
   return (
-    <section className="panel section rail-panel">
+    <section className="panel section alive rail-panel">
+      <Alive edge="top" />
       <div className="section-head">
         <h2>Top performers</h2>
         <button className="rail-link" onClick={() => go('leaderboard')}>
@@ -433,8 +434,7 @@ function MintOpen({ openToken, go }) {
   const items = useMemo(() => mintOpenBaskets(ALL, sort), [sort])
 
   return (
-    <section className="panel section alive rail-panel rail-fill">
-      <Alive edge="top" />
+    <section className="panel section lit rail-panel rail-fill">
       <div className="section-head">
         <h2>Mint open</h2>
         <span className="count live">{items.length}</span>
