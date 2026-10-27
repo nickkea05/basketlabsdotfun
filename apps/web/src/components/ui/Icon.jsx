@@ -63,16 +63,6 @@ const Icon = {
       <path d="M12 3v8M6.3 7.3a8 8 0 1 0 11.4 0" />
     </svg>
   ),
-  Expand: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-      <path d="M14 4h6v6M10 20H4v-6M20 4l-7 7M4 20l7-7" />
-    </svg>
-  ),
-  Collapse: () => (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
-      <path d="M20 10h-6V4M4 14h6v6M14 10l7-7M10 14l-7 7" />
-    </svg>
-  ),
   Image: () => (
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
       <rect x="3" y="4" width="18" height="16" rx="3" />

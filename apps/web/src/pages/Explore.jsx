@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   BASKET_TYPES,
   EMPTY_FILTERS,
@@ -7,7 +7,6 @@ import {
   PERFORMANCE_MIN_MC,
   PERFORMANCE_WINDOWS,
   SEARCH_DEFAULTS,
-  TRENDING_SIZE,
   TRENDING_SORTS,
   activeFilters,
   clearFilter,
@@ -26,7 +25,7 @@ import { all as ALL } from '../mocks/baskets.js'
 import { fmtUsd } from '../lib/format.js'
 import Alive from '../components/effects/Alive.jsx'
 import Footer from '../components/layout/Footer.jsx'
-import { Delta, Icon, Orb } from '../components/ui/index.js'
+import { Delta, Icon } from '../components/ui/index.js'
 import { usePopover } from '../components/ui/usePopover.js'
 import QuickSearch from '../features/search/QuickSearch.jsx'
 import FilterPanel from '../features/filters/FilterPanel.jsx'
@@ -34,25 +33,9 @@ import FilterPanel from '../features/filters/FilterPanel.jsx'
 const TYPE_NAME = Object.fromEntries(BASKET_TYPES.map((t) => [t.id, t.name]))
 
 const NEWEST_PAGE = 20
-
-// The rail is fixed height; Mint open gets whatever Top performers leaves.
-const RAIL_PERFORMERS = 5
+const PERFORMERS = 10
 
 const fmtSpan = (h) => (h >= 48 ? `${h / 24} days` : `${h} hours`)
-
-// Which column has taken over the main area. Kept in the URL so a refresh
-// lands back in the same view.
-const VIEWS = ['trending', 'newest']
-const readView = () => {
-  const v = new URLSearchParams(window.location.search).get('view')
-  return VIEWS.includes(v) ? v : null
-}
-const writeView = (v) => {
-  const url = new URL(window.location.href)
-  if (v) url.searchParams.set('view', v)
-  else url.searchParams.delete('view')
-  window.history.replaceState(null, '', url)
-}
 
 // Inside half a percent the pool is tracking NAV; calling that a premium is noise.
 function PremiumBadge({ t }) {
@@ -73,57 +56,17 @@ const Change = ({ v }) => (
   </small>
 )
 
-function TokenCard({ t, onOpen }) {
-  const open = isMintOpen(t)
+const Chips = ({ t, max = 3 }) => (
+  <>
+    {t.basket.slice(0, max).map((b) => (
+      <span key={b.symbol} className="chip">
+        {b.symbol}
+      </span>
+    ))}
+    {t.basket.length > max && <span className="chip">+{t.basket.length - max}</span>}
+  </>
+)
 
-  return (
-    <button className="card raised" onClick={() => onOpen(t)}>
-      <div className="art">
-        <Orb tint={t.tint} small={open} />
-        <div className="badges">
-          {open ? (
-            <span className="badge live">
-              <i className="pulse" />
-              Mint open
-            </span>
-          ) : (
-            <PremiumBadge t={t} />
-          )}
-          <span className="badge type">{TYPE_NAME[t.type]}</span>
-        </div>
-      </div>
-      <div className="card-name">{t.name}</div>
-      <div className="card-ticker">${t.ticker}</div>
-      <div className="card-mc">
-        {fmtUsd(t.marketCap)}
-        <Change v={t.change24h} />
-      </div>
-      {open && (
-        <>
-          <div className="progress">
-            <div style={{ width: `${mintWindowLeft(t) * 100}%` }} />
-          </div>
-          <div className="card-window">
-            <span>Mint at NAV</span>
-            <span>{fmtHoursLeft(mintHoursLeft(t))} left</span>
-          </div>
-        </>
-      )}
-      <div className="card-foot">
-        <div className="chips">
-          {t.basket.map((b) => (
-            <span key={b.symbol} className="chip">
-              {b.symbol}
-            </span>
-          ))}
-        </div>
-        <span>{t.age}</span>
-      </div>
-    </button>
-  )
-}
-
-/** The dense list form used in the columns and the rail. */
 function Row({ t, onOpen }) {
   const open = isMintOpen(t)
 
@@ -145,12 +88,7 @@ function Row({ t, onOpen }) {
           </span>
         ) : (
           <span className="row-sub">
-            {t.basket.slice(0, 3).map((b) => (
-              <span key={b.symbol} className="chip">
-                {b.symbol}
-              </span>
-            ))}
-            {t.basket.length > 3 && <span className="chip">+{t.basket.length - 3}</span>}
+            <Chips t={t} />
             <span className="row-age">{t.age}</span>
           </span>
         )}
@@ -185,16 +123,6 @@ function SortBar({ options, value, onChange }) {
   )
 }
 
-function Grid({ items, openToken }) {
-  return (
-    <div className="grid">
-      {items.map((t) => (
-        <TokenCard key={t.id} t={t} onOpen={openToken} />
-      ))}
-    </div>
-  )
-}
-
 function Rows({ items, openToken }) {
   return (
     <div className="rows">
@@ -205,42 +133,23 @@ function Rows({ items, openToken }) {
   )
 }
 
-function ExpandButton({ expanded, onToggle }) {
-  return expanded ? (
-    <button className="expand-btn on" onClick={onToggle} title="Back to the dashboard (Esc)">
-      <Icon.Collapse />
-      Collapse
-      <span className="kbd">Esc</span>
-    </button>
-  ) : (
-    <button className="expand-btn" onClick={onToggle} title="Expand to full view">
-      <Icon.Expand />
-    </button>
-  )
-}
-
-/** A main-area section: a scrolling column on the dashboard, or the whole area when expanded. */
-function Column({ title, count, tools, sub, expanded, onToggle, children }) {
+function Column({ title, count, tools, sub, children }) {
   return (
-    <section className={`panel section lit dash-col ${expanded ? 'expanded' : ''}`}>
-      {expanded && <div className="expanded-pill">Expanded view · collapse to return to the dashboard</div>}
+    <section className="panel section lit dash-col">
       <div className="section-head">
         <h2>{title}</h2>
         {count}
-        <div className="head-right col-tools">
-          {tools}
-          <ExpandButton expanded={expanded} onToggle={onToggle} />
-        </div>
+        <div className="head-right col-tools">{tools}</div>
       </div>
-      {sub && <p className="section-sub">{sub}</p>}
+      <p className="section-sub">{sub}</p>
       <div className="col-body">{children}</div>
     </section>
   )
 }
 
-function Trending({ openToken, expanded, onToggle }) {
+function Trending({ openToken }) {
   const [sort, setSort] = useState('vol1h')
-  const items = useMemo(() => trendingBaskets(ALL, sort, expanded ? Infinity : TRENDING_SIZE), [sort, expanded])
+  const items = useMemo(() => trendingBaskets(ALL, sort), [sort])
 
   return (
     <Column
@@ -248,16 +157,12 @@ function Trending({ openToken, expanded, onToggle }) {
       count={<span className="count">{items.length}</span>}
       tools={<SortBar options={TRENDING_SORTS} value={sort} onChange={setSort} />}
       sub="The baskets trading the most in the last hour."
-      expanded={expanded}
-      onToggle={onToggle}
     >
       {items.length === 0 ? (
         <div className="empty">
           <strong>Nothing trending yet</strong>
           The board fills in as baskets launch and trade.
         </div>
-      ) : expanded ? (
-        <Grid items={items} openToken={openToken} />
       ) : (
         <Rows items={items} openToken={openToken} />
       )}
@@ -265,7 +170,7 @@ function Trending({ openToken, expanded, onToggle }) {
   )
 }
 
-function Newest({ openToken, go, expanded, onToggle }) {
+function Newest({ openToken, go }) {
   const [q, setQ] = useState('')
   const [f, setF] = useState(EMPTY_FILTERS)
   const [shown, setShown] = useState(NEWEST_PAGE)
@@ -303,9 +208,8 @@ function Newest({ openToken, go, expanded, onToggle }) {
         )}
       </label>
       <div className="pop-anchor" ref={ref}>
-        <button className={`filter-btn ${open || active.length ? 'on' : ''}`} onClick={togglePop} aria-expanded={open}>
+        <button className={`filter-btn ${open || active.length ? 'on' : ''}`} onClick={togglePop} aria-expanded={open} aria-label="Filters">
           <Icon.Sliders />
-          {expanded && 'Filters'}
           {active.length > 0 && <span className="btn-n">{active.length}</span>}
         </button>
         {open && <FilterPanel items={ALL} applied={f} onApply={setF} onClose={close} />}
@@ -323,9 +227,7 @@ function Newest({ openToken, go, expanded, onToggle }) {
         </span>
       }
       tools={tools}
-      sub={expanded ? 'Every basket launched on basketlabs.fun, newest first.' : null}
-      expanded={expanded}
-      onToggle={onToggle}
+      sub="Every basket launched on basketlabs.fun, newest first."
     >
       {active.length > 0 && (
         <div className="active-filters">
@@ -364,7 +266,7 @@ function Newest({ openToken, go, expanded, onToggle }) {
         </div>
       ) : (
         <>
-          {expanded ? <Grid items={items.slice(0, shown)} openToken={openToken} /> : <Rows items={items.slice(0, shown)} openToken={openToken} />}
+          <Rows items={items.slice(0, shown)} openToken={openToken} />
           {items.length > shown && (
             <div className="more">
               <button className="btn btn-ghost" onClick={() => setShown((n) => n + NEWEST_PAGE)}>
@@ -378,23 +280,55 @@ function Newest({ openToken, go, expanded, onToggle }) {
   )
 }
 
+function MintOpen({ openToken, go }) {
+  const [sort, setSort] = useState('closing')
+  const items = useMemo(() => mintOpenBaskets(ALL, sort), [sort])
+
+  return (
+    <Column
+      title="Mint open"
+      count={<span className="count live">{items.length}</span>}
+      tools={<SortBar options={MINT_SORTS} value={sort} onChange={setSort} />}
+      sub={`Mint at NAV for ${MINT_WINDOW_H}h after the first buy. Then supply is fixed and the pool sets the price.`}
+    >
+      {items.length === 0 ? (
+        <div className="empty">
+          <strong>Nothing minting right now</strong>
+          Every basket opens a {MINT_WINDOW_H}-hour mint window on its first buy.
+          <div>
+            <button className="btn btn-ghost" onClick={() => go('create')}>
+              Launch one
+            </button>
+          </div>
+        </div>
+      ) : (
+        <Rows items={items} openToken={openToken} />
+      )}
+    </Column>
+  )
+}
+
 function TopPerformers({ openToken, go }) {
   const [win, setWin] = useState('7d')
   const w = PERFORMANCE_WINDOWS.find((x) => x.id === win)
-  const items = useMemo(() => topPerformers(ALL, win, RAIL_PERFORMERS), [win])
+  const items = useMemo(() => topPerformers(ALL, win, PERFORMERS), [win])
 
   return (
-    <section className="panel section alive rail-panel">
+    <section className="panel section alive perf-panel">
       <Alive edge="top" />
       <div className="section-head">
         <h2>Top performers</h2>
-        <button className="rail-link" onClick={() => go('leaderboard')}>
-          Leaderboard
-        </button>
+        <span className="count">{items.length}</span>
+        <div className="head-right col-tools">
+          <SortBar options={PERFORMANCE_WINDOWS} value={win} onChange={setWin} />
+          <button className="btn btn-ghost" onClick={() => go('leaderboard')}>
+            Leaderboard
+          </button>
+        </div>
       </div>
-      <SortBar options={PERFORMANCE_WINDOWS} value={win} onChange={setWin} />
       <p className="section-sub">
-        By NAV return · min {fmtSpan(w.minAgeH)}, ${PERFORMANCE_MIN_MC / 1000}K cap
+        Ranked by NAV return: what the holdings did, not what buyers paid on top. Needs {fmtSpan(w.minAgeH)} of history and $
+        {PERFORMANCE_MIN_MC / 1000}K market cap.
       </p>
       {items.length === 0 ? (
         <div className="empty">
@@ -402,77 +336,47 @@ function TopPerformers({ openToken, go }) {
           Baskets show up here once they have {fmtSpan(w.minAgeH)} of history.
         </div>
       ) : (
-        <ol className="perf">
+        <div className="perf-table" role="table">
+          <div className="perf-tr perf-th" role="row">
+            <span>#</span>
+            <span>Basket</span>
+            <span className="perf-holds">Holds</span>
+            <span className="r">NAV return</span>
+            <span className="r">Price vs NAV</span>
+            <span className="r">Market cap</span>
+            <span className="r perf-age">Age</span>
+          </div>
           {items.map((t, i) => (
-            <li key={t.id}>
-              <button className="perf-row" onClick={() => openToken(t)}>
-                <span className="perf-rank">{i + 1}</span>
+            <button key={t.id} className="perf-tr" role="row" onClick={() => openToken(t)}>
+              <span className="perf-rank">{i + 1}</span>
+              <span className="perf-name">
                 <span className="sm-orb perf-orb" style={{ '--tint': t.tint }} />
-                <span className="perf-name">
-                  <span>{t.name}</span>
-                  <small>
-                    ${t.ticker} · {fmtUsd(t.marketCap)}
-                  </small>
+                <span>
+                  {t.name}
+                  <small>${t.ticker}</small>
                 </span>
-                <span className="perf-val">
-                  <Delta v={w.get(t)} dp={1} />
-                  <small>
-                    <Delta v={premiumPct(t)} dp={1} /> vs NAV
-                  </small>
-                </span>
-              </button>
-            </li>
+                <span className="badge type">{TYPE_NAME[t.type]}</span>
+              </span>
+              <span className="perf-holds chips">
+                <Chips t={t} max={4} />
+              </span>
+              <span className="r perf-ret">
+                <Delta v={w.get(t)} dp={1} />
+              </span>
+              <span className="r">
+                <Delta v={premiumPct(t)} dp={1} />
+              </span>
+              <span className="r">{fmtUsd(t.marketCap)}</span>
+              <span className="r muted perf-age">{t.age}</span>
+            </button>
           ))}
-        </ol>
+        </div>
       )}
     </section>
   )
 }
 
-function MintOpen({ openToken, go }) {
-  const [sort, setSort] = useState('closing')
-  const items = useMemo(() => mintOpenBaskets(ALL, sort), [sort])
-
-  return (
-    <section className="panel section lit rail-panel rail-fill">
-      <div className="section-head">
-        <h2>Mint open</h2>
-        <span className="count live">{items.length}</span>
-      </div>
-      <SortBar options={MINT_SORTS} value={sort} onChange={setSort} />
-      <p className="section-sub">Mint at NAV for {MINT_WINDOW_H}h after the first buy. Then supply is fixed and the pool sets the price.</p>
-      <div className="col-body">
-        {items.length === 0 ? (
-          <div className="empty">
-            <strong>Nothing minting right now</strong>
-            Every basket opens a {MINT_WINDOW_H}-hour mint window on its first buy.
-            <div>
-              <button className="btn btn-ghost" onClick={() => go('create')}>
-                Launch one
-              </button>
-            </div>
-          </div>
-        ) : (
-          <Rows items={items} openToken={openToken} />
-        )}
-      </div>
-    </section>
-  )
-}
-
 export default function Explore({ openToken, go }) {
-  const [view, setView] = useState(readView)
-  const toggle = (v) => setView((cur) => (cur === v ? null : v))
-
-  useEffect(() => writeView(view), [view])
-
-  useEffect(() => {
-    if (!view) return
-    const onKey = (e) => e.key === 'Escape' && setView(null)
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
-  }, [view])
-
   return (
     <div className="page container wide">
       <div className="toolbar">
@@ -486,16 +390,13 @@ export default function Explore({ openToken, go }) {
         </button>
       </div>
 
-      <div className={`dash ${view ? 'has-expanded' : ''}`}>
-        <div className="dash-main">
-          {(!view || view === 'trending') && <Trending openToken={openToken} expanded={view === 'trending'} onToggle={() => toggle('trending')} />}
-          {(!view || view === 'newest') && <Newest openToken={openToken} go={go} expanded={view === 'newest'} onToggle={() => toggle('newest')} />}
-        </div>
-        <aside className="dash-rail">
-          <TopPerformers openToken={openToken} go={go} />
-          <MintOpen openToken={openToken} go={go} />
-        </aside>
+      <div className="dash">
+        <Trending openToken={openToken} />
+        <Newest openToken={openToken} go={go} />
+        <MintOpen openToken={openToken} go={go} />
       </div>
+
+      <TopPerformers openToken={openToken} go={go} />
 
       <Footer go={go} />
     </div>
