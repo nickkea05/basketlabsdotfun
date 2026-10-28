@@ -1,4 +1,4 @@
-# basketlabs.fun — program build progress (handoff)
+b# basketlabs.fun — program build progress (handoff)
 
 Living log for the `basket` Anchor program build. Spec is
 `docs/program-build-confirmation.md` (D1–D20, §1–§9) **as amended by
