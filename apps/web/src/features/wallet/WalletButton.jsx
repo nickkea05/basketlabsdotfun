@@ -1,8 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { explorerUrl, shortKey } from '@basketfun/solana'
+import { shortKey } from '@basketfun/solana'
 import { Icon } from '../../components/ui/index.js'
+import { IS_FORK, explorerAddressUrl, fundTestWallet } from '../../lib/chain.js'
 import { useWallet } from './useWallet.js'
 import { useCopy } from './useCopy.js'
+import { useSolBalance } from './useSolBalance.js'
+
+const fmtSol = (lamports) => (lamports == null ? '–' : (lamports / 1e9).toLocaleString(undefined, { maximumFractionDigits: 3 }))
 
 /** Nav control: "Connect" when idle, an address pill with a small menu once connected. */
 export default function WalletButton({ go }) {
@@ -10,6 +14,19 @@ export default function WalletButton({ go }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
   const [copied, copy] = useCopy(address)
+  const [lamports, refreshBalance] = useSolBalance(connected ? address : null)
+  const [funding, setFunding] = useState(null) // null | 'busy' | 'done' | error message
+
+  const getTestFunds = async () => {
+    setFunding('busy')
+    try {
+      await fundTestWallet(address)
+      await refreshBalance()
+      setFunding('done')
+    } catch (e) {
+      setFunding(e.message || 'Could not reach the local fork.')
+    }
+  }
 
   useEffect(() => {
     if (!open) return
@@ -46,12 +63,23 @@ export default function WalletButton({ go }) {
             <div className="wallet-menu-addr mono" title={address}>
               {shortKey(address, 8)}
             </div>
+            <div className="wallet-menu-balance mono">
+              {fmtSol(lamports)} SOL{IS_FORK && <span className="wallet-fork-tag">local fork</span>}
+            </div>
           </div>
+          {IS_FORK && (
+            <>
+              <button role="menuitem" onClick={getTestFunds} disabled={funding === 'busy'}>
+                <Icon.Wallet /> {funding === 'busy' ? 'Funding…' : funding === 'done' ? 'Funded: 100 SOL + test tokens' : 'Get test funds'}
+              </button>
+              {funding && funding !== 'busy' && funding !== 'done' && <div className="wallet-menu-error">{funding}</div>}
+            </>
+          )}
           <button role="menuitem" onClick={copy}>
             <Icon.Copy /> {copied ? 'Copied' : 'Copy address'}
           </button>
-          <a role="menuitem" href={explorerUrl(address)} target="_blank" rel="noreferrer">
-            <Icon.Link /> View on Solscan
+          <a role="menuitem" href={explorerAddressUrl(address)} target="_blank" rel="noreferrer">
+            <Icon.Link /> {IS_FORK ? 'View in explorer (fork)' : 'View on Solscan'}
           </a>
           <button
             role="menuitem"

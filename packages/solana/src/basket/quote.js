@@ -32,6 +32,8 @@ export function mintQuote(state, deposits) {
   const rBps = effectiveRBps(state.basket.sleeve, state.poolSol)
   const treasury = treasuryShares(gross, rBps)
   const sleeveLamports = lamportsForX(treasury, binPriceQ64(state.activeId, state.binStep))
+  const impliedTotalLamports = (sleeveLamports * BPS) / BigInt(rBps)
+  const minLamports = BigInt(state.config.fees.minMintLamports.toString())
   return {
     grossShares: gross,
     toBuyer: gross - feeShares,
@@ -39,7 +41,10 @@ export function mintQuote(state, deposits) {
     rBps,
     treasuryShares: treasury,
     sleeveLamports,
-    impliedTotalLamports: (sleeveLamports * BPS) / BigInt(rBps),
+    impliedTotalLamports,
+    /** The program rejects buys whose implied size (`sleeve / r`) is under `min_mint_lamports`. */
+    minLamports,
+    belowMinimum: sleeveLamports > 0n && impliedTotalLamports < minLamports,
   }
 }
 

@@ -18,6 +18,13 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (p) => p.replace(/^\/api\/gt/, ''),
       },
+      // The local Surfpool mainnet fork: the site's chain in dev (see
+      // src/lib/chain.js).
+      '/api/chain': {
+        target: 'http://127.0.0.1:8899',
+        changeOrigin: true,
+        rewrite: () => '/',
+      },
       // Solana JSON-RPC for strategy test runs. Public mainnet endpoint in
       // dev; a keyed provider behind the same path in production.
       '/api/rpc': {

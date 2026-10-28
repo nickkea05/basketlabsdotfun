@@ -12,7 +12,9 @@
     "@basketfun/core": "*",
     "@basketfun/data": "*",
     "@basketfun/solana": "*",
+    "@solana/web3.js": "^1.99.0",
     "@wallet-standard/app": "^1.1.1",
+    "buffer": "^6.0.3",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

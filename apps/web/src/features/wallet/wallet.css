@@ -237,6 +237,33 @@
   background: var(--line);
   margin: 6px 4px;
 }
+.wallet-menu-balance {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 6px;
+}
+.wallet-fork-tag {
+  font-family: inherit;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--accent);
+  border: 1px solid currentColor;
+}
+.wallet-menu [role='menuitem']:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.wallet-menu-error {
+  font-size: 12px;
+  color: #ff7aa8;
+  padding: 0 10px 6px;
+}
 
 /* ---------- portfolio strip ---------- */
 

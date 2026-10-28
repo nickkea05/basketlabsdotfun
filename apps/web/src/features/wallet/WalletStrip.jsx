@@ -1,5 +1,6 @@
-import { explorerUrl, shortKey } from '@basketfun/solana'
+import { shortKey } from '@basketfun/solana'
 import { Icon } from '../../components/ui/index.js'
+import { IS_FORK, explorerAddressUrl } from '../../lib/chain.js'
 import { useWallet } from './useWallet.js'
 import { useCopy } from './useCopy.js'
 
@@ -27,11 +28,11 @@ export default function WalletStrip() {
         </button>
         <a
           className="icon-btn sq wallet-strip-btn"
-          href={explorerUrl(address)}
+          href={explorerAddressUrl(address)}
           target="_blank"
           rel="noreferrer"
-          aria-label="View on Solscan"
-          title="View on Solscan"
+          aria-label={IS_FORK ? 'View in explorer (fork)' : 'View on Solscan'}
+          title={IS_FORK ? 'View in explorer (fork)' : 'View on Solscan'}
         >
           <Icon.Link />
         </a>

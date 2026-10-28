@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getWallets } from '@wallet-standard/app'
-import { rankWallets, solanaAddresses } from '@basketfun/solana'
+import { PublicKey, VersionedTransaction } from '@solana/web3.js'
+import { base58Encode, rankWallets } from '@basketfun/solana'
+import { buildTransaction, confirmSignature } from '@basketfun/solana/basket'
+import { IS_FORK, WALLET_CHAIN, getConnection } from '../../lib/chain.js'
 import { WalletContext } from './context.js'
 import ConnectModal from './ConnectModal.jsx'
 import './wallet.css'
 
 // Wallet Standard, directly. Phantom (and every other Solana wallet) registers
 // itself on the page; we list what is there, connect to one, and remember the
-// choice so the next visit reconnects silently. Nothing here signs anything.
+// choice so the next visit reconnects silently. `sendInstructions` is the one
+// path that asks the wallet to sign.
+
+const SOLANA_CHAIN = /^solana:/
+const solanaAccount = (accounts) => (accounts ?? []).find((a) => a.chains?.some((c) => SOLANA_CHAIN.test(c)))
 
 const STORAGE_KEY = 'basketfun.wallet'
 
@@ -31,7 +38,8 @@ const remembered = () => {
 export function WalletProvider({ children }) {
   const [wallets, setWallets] = useState(() => rankWallets(registry.get()))
   const [wallet, setWallet] = useState(null) // the connected Wallet Standard object
-  const [address, setAddress] = useState(null)
+  const [account, setAccount] = useState(null) // its Solana WalletAccount
+  const address = account?.address ?? null
   const [connecting, setConnecting] = useState(null) // wallet name while a connect() is pending
   const [error, setError] = useState(null)
   const [modalOpen, setModalOpen] = useState(false)
@@ -45,15 +53,15 @@ export function WalletProvider({ children }) {
 
   const clear = useCallback(() => {
     setWallet(null)
-    setAddress(null)
+    setAccount(null)
     remember(null)
   }, [])
 
   const adopt = useCallback((w, accounts) => {
-    const [addr] = solanaAddresses(accounts)
-    if (!addr) throw new Error('The wallet did not share a Solana account.')
+    const acc = solanaAccount(accounts)
+    if (!acc) throw new Error('The wallet did not share a Solana account.')
     setWallet(w)
-    setAddress(addr)
+    setAccount(acc)
     setModalOpen(false)
     remember(w.name)
   }, [])
@@ -108,11 +116,51 @@ export function WalletProvider({ children }) {
     if (!events) return
     return events.on('change', ({ accounts }) => {
       if (!accounts) return
-      const [addr] = solanaAddresses(accounts)
-      if (addr) setAddress(addr)
+      const acc = solanaAccount(accounts)
+      if (acc) setAccount(acc)
       else clear()
     })
   }, [wallet, clear])
+
+  /**
+   * Build, sign and land one transaction from the connected account.
+   * Mainnet: the wallet signs and sends (what Phantom asks dapps to use).
+   * Fork: the wallet only signs, since it cannot reach the local RPC, and
+   * we submit. Resolves with the signature once confirmed.
+   */
+  const sendInstructions = useCallback(
+    async (instructions, { lookupTables = [], cu } = {}) => {
+      if (!wallet || !account) throw new Error('Connect a wallet first.')
+      const connection = getConnection()
+      const { transaction, lastValidBlockHeight } = await buildTransaction(connection, {
+        payer: new PublicKey(account.address),
+        instructions,
+        lookupTables,
+        cu,
+      })
+      const bytes = transaction.serialize()
+      const chain = WALLET_CHAIN ? { chain: WALLET_CHAIN } : {}
+      const signAndSend = wallet.features['solana:signAndSendTransaction']
+      let signature
+      try {
+        if (!IS_FORK && signAndSend) {
+          const [out] = await signAndSend.signAndSendTransaction({ account, transaction: bytes, ...chain })
+          signature = base58Encode(out.signature)
+        } else {
+          const sign = wallet.features['solana:signTransaction']
+          if (!sign) throw new Error(`${wallet.name} cannot sign transactions.`)
+          const [out] = await sign.signTransaction({ account, transaction: bytes, ...chain })
+          const signed = VersionedTransaction.deserialize(out.signedTransaction)
+          signature = await connection.sendRawTransaction(signed.serialize(), { skipPreflight: false })
+        }
+      } catch (e) {
+        throw new Error(friendly(e))
+      }
+      await confirmSignature(connection, signature, lastValidBlockHeight)
+      return signature
+    },
+    [wallet, account]
+  )
 
   const value = {
     wallets,
@@ -123,6 +171,7 @@ export function WalletProvider({ children }) {
     error,
     connect,
     disconnect,
+    sendInstructions,
     openConnect: () => {
       setError(null)
       setModalOpen(true)
@@ -141,5 +190,5 @@ export function WalletProvider({ children }) {
 function friendly(e) {
   const m = String(e?.message || '')
   if (/reject|denied|cancel/i.test(m)) return 'Request was rejected in the wallet.'
-  return m || 'Could not connect.'
+  return m || 'Wallet request failed.'
 }
