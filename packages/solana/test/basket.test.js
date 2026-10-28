@@ -75,11 +75,11 @@ test('equalWeights sums to 10000 and treasuryShares is H r/(1 - r)', () => {
   assert.equal(treasuryShares(3_000_000_000n, 2500), 1_000_000_000n)
 })
 
-test('chunkBook packs 6 then 8 per transaction', () => {
+test('chunkBook packs 5 then 8 per transaction', () => {
   const book = makeBook(keys(23), equalWeights(23))
   const { first, rest } = chunkBook(book)
-  assert.equal(first.length, 6)
-  assert.deepEqual(rest.map((c) => c.length), [8, 8, 1])
+  assert.equal(first.length, 5)
+  assert.deepEqual(rest.map((c) => c.length), [8, 8, 2])
 })
 
 test('lb pair PDA is order independent', () => {

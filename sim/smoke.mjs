@@ -14,6 +14,7 @@ import {
   STEP_R_BPS,
   WSOL_MINT,
   ata,
+  basketLookupAddresses,
   basketPda,
   bookHash,
   chunkBook,
@@ -24,7 +25,6 @@ import {
   makeBook,
   shareMintPda,
   treasuryShares,
-  whitelistPda,
 } from '@basketfun/solana/basket'
 import {
   adminKeypair,
@@ -34,6 +34,7 @@ import {
   fmtSol,
   fundSol,
   mintInfo,
+  saveLastBasket,
   send,
   setTokenBalance,
   simKey,
@@ -41,11 +42,19 @@ import {
   unitsUsed,
 } from './lib.mjs'
 
-const COMPONENTS = [
+const UNIVERSE = [
   ['JUP', 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN'],
   ['BONK', 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'],
   ['JitoSOL', 'J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn'],
+  ['WIF', 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm'],
+  ['mSOL', 'mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So'],
+  ['PYTH', 'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3'],
+  ['JTO', 'jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL'],
+  ['RAY', '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R'],
+  ['ORCA', 'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE'],
 ]
+/** Component count: `SIM_N=8 node sim/smoke.mjs`. */
+const COMPONENTS = UNIVERSE.slice(0, Number(process.env.SIM_N ?? 3))
 /** SOL value of the components in the first buy; the sleeve adds r/(1−r) on top. */
 const COMPONENT_VALUE_LAMPORTS = 1_500_000_000n
 const LAUNCH_ACTIVE_ID = 0
@@ -107,34 +116,15 @@ const nonce = Date.now()
 const shareMint = shareMintPda(deployer.publicKey, nonce)
 const basket = basketPda(shareMint)
 const pool = dlmm.poolFor(shareMint, WSOL_MINT)
-const lut = await createLookupTable(deployer, [
-  client.programId,
-  DLMM_PROGRAM_ID,
-  configPda(),
-  whitelistPda(),
-  WSOL_MINT,
-  dlmm.eventAuthority(),
-  new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'),
-  new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-  new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'),
-  new PublicKey('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL'),
-  new PublicKey('11111111111111111111111111111111'),
-  new PublicKey('SysvarRent111111111111111111111111111111111'),
-  new PublicKey('Sysvar1nstructions1111111111111111111111111'),
-  new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr'),
-  shareMint,
-  basket,
-  pool.lbPair,
-  pool.reserveX,
-  pool.reserveY,
-  pool.oracle,
-  ...mints,
-])
+const lut = await createLookupTable(deployer, basketLookupAddresses({ shareMint, book }))
 log(`lut ${lut.toBase58()}`)
 
 step('create_basket')
 const now = await chainNow()
-const { first, rest } = chunkBook(book)
+const chunking = {}
+if (process.env.SIM_FIRST) chunking.first = Number(process.env.SIM_FIRST)
+if (process.env.SIM_PER) chunking.per = Number(process.env.SIM_PER)
+const { first, rest } = chunkBook(book, chunking)
 const createIx = await client.createBasketIx({
   payer: deployer.publicKey,
   chunk: first,
@@ -207,4 +197,5 @@ for (const [i, p] of book.entries()) {
   const vault = await connection.getTokenAccountBalance(ata(basket, p.mint, p.tokenProgram))
   log(`  vault ${COMPONENTS[i][0].padEnd(8)} ${vault.value.uiAmountString}`)
 }
+saveLastBasket({ shareMint: shareMint.toBase58(), lut: lut.toBase58(), components: COMPONENTS.length })
 log('\nsmoke ok')

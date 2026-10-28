@@ -35,6 +35,22 @@ export function simKey(name) {
   return kp
 }
 
+const LAST_BASKET = join(KEYS_DIR, 'last-basket.json')
+
+export function saveLastBasket(info) {
+  mkdirSync(KEYS_DIR, { recursive: true })
+  writeFileSync(LAST_BASKET, JSON.stringify(info, null, 2))
+}
+
+/** The basket the last smoke run launched. */
+export function lastBasket() {
+  if (!existsSync(LAST_BASKET)) throw new Error('no basket yet: run node sim/smoke.mjs')
+  const info = JSON.parse(readFileSync(LAST_BASKET, 'utf8'))
+  return { ...info, shareMint: new PublicKey(info.shareMint) }
+}
+
+export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
 export async function rpc(method, params = []) {
   const res = await fetch(RPC_URL, {
     method: 'POST',

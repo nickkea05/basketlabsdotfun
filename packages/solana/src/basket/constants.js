@@ -44,6 +44,7 @@ export const DLMM_SEEDS = Object.freeze({
 
 export const BasketTypeWire = Object.freeze({ Fixed: 0, Mirror: 1, Managed: 2, Strategy: 3 })
 export const FixedKind = Object.freeze({ Index: 0 })
+export const BackstopState = Object.freeze({ Unplaced: 0, Funding: 1, Live: 2, Withdrawing: 3, Closed: 4 })
 
 /** `Config.cluster` passed to `initialize_config`. */
 export const Cluster = Object.freeze({ Mainnet: 0, Devnet: 1, Localnet: 2 })
@@ -55,8 +56,12 @@ export const MINT_WINDOW_S = 48 * 60 * 60
 export const STEP_R_BPS = 2_500
 export const MIN_SEED_LAMPORTS = LAMPORTS_PER_SOL
 
-/** Positions per transaction: `create_basket` carries at most 6, `add_positions` 8. */
-export const CREATE_BASKET_POSITIONS = 6
+/**
+ * Positions per transaction. The program accepts 6 in `create_basket`, but
+ * 6 exceeds the runtime's 64-instruction trace limit on a real validator
+ * (measured on the Surfpool fork); 5 fits. `add_positions` fits 8.
+ */
+export const CREATE_BASKET_POSITIONS = 5
 export const POSITIONS_PER_TX = 8
 
 export const DLMM_BINS_PER_ARRAY = 70

@@ -4,10 +4,13 @@
 // programs/basket/tests/common.
 
 import { AnchorProvider, BN, Program } from '@anchor-lang/core'
-import { ComputeBudgetProgram, Keypair, TransactionInstruction } from '@solana/web3.js'
+import { ComputeBudgetProgram, Keypair, PublicKey, TransactionInstruction } from '@solana/web3.js'
 import idl from '../../idl/basket.json' with { type: 'json' }
+import { positionAmounts } from './pool.js'
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
+  BASKET_PROGRAM_ID,
+  BackstopState,
   CREATE_BASKET_POSITIONS,
   CU_LIMIT,
   DLMM_PROGRAM_ID,
@@ -100,10 +103,10 @@ export function createAtaIdempotentIx(payer, owner, mint, tokenProgram = TOKEN_P
 }
 
 /** Split a book into the `create_basket` chunk and the `add_positions` chunks. */
-export function chunkBook(book) {
-  const first = book.slice(0, CREATE_BASKET_POSITIONS)
+export function chunkBook(book, { first: firstSize = CREATE_BASKET_POSITIONS, per = POSITIONS_PER_TX } = {}) {
+  const first = book.slice(0, firstSize)
   const rest = []
-  for (let i = CREATE_BASKET_POSITIONS; i < book.length; i += POSITIONS_PER_TX) rest.push(book.slice(i, i + POSITIONS_PER_TX))
+  for (let i = firstSize; i < book.length; i += per) rest.push(book.slice(i, i + per))
   return { first, rest }
 }
 
@@ -142,6 +145,78 @@ export class BasketClient {
     const info = await this.connection.getAccountInfo(lbPair)
     if (!info) throw new Error(`lb pair ${lbPair.toBase58()} not found`)
     return dlmm.decodeLbPair(info.data)
+  }
+
+  /** The basket's component `Position` accounts in book order. */
+  async fetchBook(shareMint) {
+    const basket = basketPda(shareMint)
+    const rows = await this.program.account.position.all([{ memcmp: { offset: 9, bytes: basket.toBase58() } }])
+    return rows.map((r) => r.account).sort((a, b) => a.index - b.index)
+  }
+
+  /**
+   * Everything a quote needs, read the way `PoolView` reads it: component
+   * vaults net of frozen claims, holder shares, the SOL and shares inside
+   * both positions, the active bin and the bin arrays that exist.
+   */
+  async loadState(shareMint) {
+    const basketKey = basketPda(shareMint)
+    const [basket, config, positions] = await Promise.all([this.fetchBasket(shareMint), this.fetchConfig(), this.fetchBook(shareMint)])
+    const lbPair = basket.pool.lbPair
+    const backstopLive = BACKSTOP_HAS_LIQUIDITY.has(basket.backstopState) && isSet(basket.backstop)
+    const ranges = [basket.tight, ...(backstopLive ? [basket.backstop] : [])].filter(isSet)
+    const indices = [...new Set(ranges.flatMap((r) => dlmm.binArrayIndices(r.lowerBinId, r.upperBinId)))]
+    const keys = [
+      lbPair,
+      shareMint,
+      ata(basketKey, shareMint),
+      ata(basketKey, WSOL_MINT),
+      ...ranges.map((r) => r.key),
+      ...indices.map((i) => dlmm.binArray(lbPair, i)),
+      ...positions.map((p) => p.vault),
+    ]
+    const infos = await this.connection.getMultipleAccountsInfo(keys)
+    let k = 0
+    const lb = dlmm.decodeLbPair(infos[k++].data)
+    const supply = infos[k++].data.readBigUInt64LE(36)
+    const tokenAmount = (info) => (info ? info.data.readBigUInt64LE(64) : 0n)
+    const idleShares = tokenAmount(infos[k++])
+    const idleSol = tokenAmount(infos[k++])
+    const positionData = ranges.map(() => infos[k++]?.data)
+    const arrays = new Map()
+    for (const i of indices) {
+      const info = infos[k++]
+      if (info) arrays.set(i, info.data)
+    }
+    const amounts = positionData.map((d) => (d ? positionAmounts(d, arrays) : null))
+    const tight = isSet(basket.tight) ? amounts[0] : null
+    const backstop = backstopLive ? amounts[ranges.length - 1] : null
+    const book = positions.map((p) => ({
+      mint: p.mint,
+      weightBps: p.weightBps,
+      tokenProgram: p.tokenProgram,
+      decimals: p.decimals,
+      vault: p.vault,
+      available: tokenAmount(infos[k++]) - big(p.owed),
+    }))
+    const inPositions = (f) => (tight?.[f] ?? 0n) + (backstop?.[f] ?? 0n)
+    return {
+      shareMint,
+      basketKey,
+      basket,
+      config,
+      book,
+      supply,
+      idleShares,
+      idleSol,
+      activeId: lb.activeId,
+      binStep: lb.binStep,
+      tight,
+      backstop,
+      binArrays: [...arrays.keys()],
+      holderShares: supply - inPositions('amountX') - idleShares + big(basket.pendingRedeemShares),
+      poolSol: inPositions('amountY') + idleSol,
+    }
   }
 
   // ---- admin ----
@@ -261,6 +336,112 @@ export class BasketClient {
       .remainingAccounts([...componentMetas(basket, shareMint, payer, chunk), ...binArrayMetas(pool.lbPair, lower, upper)])
       .instruction()
   }
+
+  // ---- buys and sells ----
+
+  /**
+   * Mint at NAV while the gate is open. `state` from `loadState`; `deposits`
+   * in book order (see `depositsForShares`); bounds from `mintBounds`.
+   */
+  mintIx({ payer, state, deposits, minSharesOut, maxSleeveLamports }) {
+    return this.program.methods
+      .mint({ deposits: deposits.map(bn), minSharesOut: bn(minSharesOut), maxSleeveLamports: bn(maxSleeveLamports) })
+      .accountsStrict({
+        payer,
+        config: configPda(),
+        basket: state.basketKey,
+        shareAuth: shareAuthPda(state.shareMint),
+        payerShareAta: ata(payer, state.shareMint),
+        ...sleeveAccounts(state),
+      })
+      .remainingAccounts([...componentMetas(state.basketKey, state.shareMint, payer, state.book), ...poolTail(state)])
+      .instruction()
+  }
+
+  /** Single-transaction redeem over the whole book. Never gated. */
+  redeemIx({ holder, state, shares }) {
+    return this.program.methods
+      .redeem(bn(shares))
+      .accountsStrict({
+        holder,
+        basket: state.basketKey,
+        holderShareAta: ata(holder, state.shareMint),
+        holderWsolAta: ata(holder, WSOL_MINT),
+        ...sleeveAccounts(state),
+      })
+      .remainingAccounts([...componentMetas(state.basketKey, state.shareMint, holder, state.book), ...poolTail(state)])
+      .instruction()
+  }
+}
+
+const BACKSTOP_HAS_LIQUIDITY = new Set([BackstopState.Funding, BackstopState.Live, BackstopState.Withdrawing])
+const isSet = (ref) => !ref.key.equals(PublicKey.default)
+const big = (v) => BigInt(v.toString())
+
+/** Pool accounts every sleeve instruction (mint, redeem) shares. */
+function sleeveAccounts(state) {
+  const { shareMint, basketKey } = state
+  const feeVault = feeVaultPda(shareMint)
+  const pool = dlmm.poolFor(shareMint, WSOL_MINT)
+  const backstop = isSet(state.basket.backstop) ? state.basket.backstop.key : shareAuthPda(shareMint)
+  return {
+    shareMint,
+    feeVault,
+    feeVaultShareAta: ata(feeVault, shareMint),
+    wsolMint: WSOL_MINT,
+    basketShareAta: ata(basketKey, shareMint),
+    basketWsolAta: ata(basketKey, WSOL_MINT),
+    lbPair: pool.lbPair,
+    reserveX: pool.reserveX,
+    reserveY: pool.reserveY,
+    tightPosition: state.basket.tight.key,
+    backstopPosition: backstop,
+    dlmmEventAuthority: dlmm.eventAuthority(),
+    dlmmProgram: DLMM_PROGRAM_ID,
+    memoProgram: MEMO_PROGRAM_ID,
+    ...tokenPrograms,
+  }
+}
+
+/** Existing bin arrays under both positions: the tail `mint` and `redeem` read. */
+const poolTail = (state) => state.binArrays.map((i) => w(dlmm.binArray(state.basket.pool.lbPair, i)))
+
+/**
+ * Addresses fixed for a basket's lifetime, for its address lookup table:
+ * programs and sysvars, the pool, the basket's own accounts and every
+ * component's mint, position and vault. Buyer-specific ATAs, positions that
+ * move (tight, backstop) and bin arrays stay out. Works before launch:
+ * `book` needs only `mint` (and `tokenProgram` for Token-2022 components).
+ */
+export function basketLookupAddresses({ shareMint, book }) {
+  const basketKey = basketPda(shareMint)
+  const pool = dlmm.poolFor(shareMint, WSOL_MINT)
+  const feeVault = feeVaultPda(shareMint)
+  return [
+    BASKET_PROGRAM_ID,
+    DLMM_PROGRAM_ID,
+    MEMO_PROGRAM_ID,
+    METAPLEX_PROGRAM_ID,
+    ...Object.values(tokenPrograms),
+    SYSVAR_RENT_ID,
+    SYSVAR_INSTRUCTIONS_ID,
+    configPda(),
+    whitelistPda(),
+    WSOL_MINT,
+    dlmm.eventAuthority(),
+    shareMint,
+    basketKey,
+    shareAuthPda(shareMint),
+    feeVault,
+    ata(feeVault, shareMint),
+    ata(basketKey, shareMint),
+    ata(basketKey, WSOL_MINT),
+    pool.lbPair,
+    pool.reserveX,
+    pool.reserveY,
+    pool.oracle,
+    ...book.flatMap((p) => [p.mint, componentPositionPda(shareMint, p.mint), ata(basketKey, p.mint, p.tokenProgram)]),
+  ]
 }
 
 /** `ConfigUpdate` with every field `None` unless set in `fields`. */
