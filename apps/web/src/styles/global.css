@@ -205,12 +205,11 @@ a {
   content: '';
   position: absolute;
   top: -1px;
-  left: 18px;
-  right: 18px;
-  height: 2px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, transparent, rgba(255, 63, 128, 0.95) 20%, rgba(255, 63, 128, 0.35) 50%, transparent 85%);
-  box-shadow: 0 0 12px 1px rgba(255, 63, 128, 0.35);
+  left: 24px;
+  right: 24px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 63, 128, 0.45) 30%, rgba(255, 63, 128, 0.45) 70%, transparent);
+  box-shadow: 0 0 6px rgba(255, 63, 128, 0.12);
   pointer-events: none;
   z-index: 3;
 }
@@ -219,7 +218,7 @@ a {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: radial-gradient(520px 200px at 20% 0%, rgba(255, 63, 128, 0.07), transparent 70%);
+  background: radial-gradient(480px 160px at 50% 0%, rgba(255, 63, 128, 0.03), transparent 70%);
   pointer-events: none;
   z-index: 0;
 }
